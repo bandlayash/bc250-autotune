@@ -1,6 +1,7 @@
 benchmarks/raw/*
 !benchmarks/raw/.gitkeep
-!benchmarks/raw/examples/
+!benchmarks/raw/20260910-004849-stock/
+!benchmarks/raw/20260910-004450-tuned-1650/
 snapshots/
 __pycache__/
 *.pyc
@@ -9,3 +10,4 @@ dist/
 build/
 *.egg-info/
 .pytest_cache/
+.ruff_cache/
