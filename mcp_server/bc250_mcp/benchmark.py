@@ -793,8 +793,7 @@ def run(
     samples_path = raw_dir / "samples.jsonl"
     try:
         with open(samples_path, "w") as handle:
-            for sample in sampler.samples:
-                handle.write(json.dumps(asdict(sample)) + "\n")
+            handle.writelines(json.dumps(asdict(sample)) + "\n" for sample in sampler.samples)
         result.samples_path = str(samples_path.relative_to(bench_root().parent))
     except OSError as exc:
         result.warnings.append(f"could not write samples: {exc}")

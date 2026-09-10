@@ -88,11 +88,11 @@ class TestQuickStatsParsing:
 
 class TestSummarise:
     def _samples(self, count=10, **overrides):
-        base = dict(
-            gpu_temp_c=80.0, gpu_power_w=60.0, socket_power_w=130.0,
-            gpu_clock_mhz=772, cpu_temp_c=70.0, cpu_vid_mv=1100,
-            fan_rpm=2700, throttle_flags=[],
-        )
+        base = {
+            "gpu_temp_c": 80.0, "gpu_power_w": 60.0, "socket_power_w": 130.0,
+            "gpu_clock_mhz": 772, "cpu_temp_c": 70.0, "cpu_vid_mv": 1100,
+            "fan_rpm": 2700, "throttle_flags": [],
+        }
         base.update(overrides)
         return [Sample(t=float(i), **base) for i in range(count)]
 

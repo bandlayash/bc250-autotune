@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from . import governor, snapshots, sysfs
-from .snapshots import FanCapture, FileCapture, Snapshot
+from .snapshots import Snapshot
 
 _TIMEOUT = 30
 

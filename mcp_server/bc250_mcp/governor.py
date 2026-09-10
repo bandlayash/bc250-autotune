@@ -363,8 +363,10 @@ def get_state(backend: str | None = None) -> GovernorState:
         active=False,
         enabled=False,
         warnings=[
-            "no GPU governor detected (neither oberon-governor nor "
-            "cyan-skillfish-governor-smu is installed or running)"
+            (
+                "no GPU governor detected (neither oberon-governor nor "
+                "cyan-skillfish-governor-smu is installed or running)"
+            )
         ],
     )
 

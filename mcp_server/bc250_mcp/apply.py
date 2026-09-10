@@ -143,7 +143,7 @@ def _write_pending(label: str, description: str, stability_minutes: int) -> None
         if (candidate / "watchdog.py").exists():
             if str(candidate) not in sys.path:
                 sys.path.insert(0, str(candidate))
-            import watchdog  # noqa: PLC0415
+            import watchdog
 
             watchdog.write_pending(label, description, stability_minutes)
             return
@@ -325,7 +325,7 @@ def _clear_pending() -> None:
         if (candidate / "watchdog.py").exists():
             if str(candidate) not in sys.path:
                 sys.path.insert(0, str(candidate))
-            import watchdog  # noqa: PLC0415
+            import watchdog
 
             watchdog.clear_pending()
             return

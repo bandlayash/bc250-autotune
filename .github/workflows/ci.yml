@@ -1,0 +1,55 @@
+name: CI
+
+# There is no BC-250 in CI. Every test here runs against mocked sysfs, mocked
+# subprocesses, and synthetic gpu_metrics blobs -- nothing touches hardware,
+# and nothing that does should ever be added. Hardware-in-the-loop testing
+# happens on a real unit, deliberately and by hand.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        working-directory: mcp_server
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Lint
+        working-directory: mcp_server
+        run: ruff check bc250_mcp tests
+      - name: Test
+        working-directory: mcp_server
+        run: python -m pytest tests -q
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Shell scripts parse
+        run: |
+          for f in benchmarks/scripts/*.sh; do bash -n "$f"; done
+      - name: Python scripts compile
+        run: python -m py_compile benchmarks/scripts/*.py watchdog/watchdog.py
+      - name: README generator is idempotent
+        # Running it twice must leave the file byte-identical, since it is
+        # wired into the end of every tuning session.
+        run: |
+          python benchmarks/scripts/generate_readme_benchmarks.py
+          python benchmarks/scripts/generate_readme_benchmarks.py
+          git diff --exit-code README.md

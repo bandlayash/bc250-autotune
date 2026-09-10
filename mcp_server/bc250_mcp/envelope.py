@@ -94,7 +94,7 @@ def load(path: Path | None = None) -> dict[str, Any]:
 
     try:
         doc = yaml.safe_load(raw)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise EnvelopeError(f"safety envelope at {path} is not valid YAML: {exc}") from exc
 
     if not isinstance(doc, dict):
