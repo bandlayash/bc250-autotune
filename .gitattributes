@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.service text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.png binary
