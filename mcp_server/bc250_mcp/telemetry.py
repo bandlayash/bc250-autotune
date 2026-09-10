@@ -19,10 +19,32 @@ from typing import Any
 
 from . import sysfs
 
-# amdgpu's hwmon labels its two voltage rails in0/in1. On the BC-250 in0 tracks
-# the GFX rail and in1 the SoC rail; upstream bc250_smu_oc reads the same pair.
-GFX_VOLTAGE_ATTR = "in0_input"
-SOC_VOLTAGE_ATTR = "in1_input"
+# amdgpu's hwmon exposes two unlabelled voltage rails, in0 and in1. Which is
+# which was established empirically against the SMU on the test unit rather
+# than assumed, because getting it backwards would hide the most dangerous
+# number in the system behind a harmless-looking name:
+#
+#   in0_input  GPU/GFX rail. Held steady at 868 mV while the SMU's
+#              q3_0x37_get_current_gpu_voltage() read 874 mV -- a small constant
+#              offset from separate sampling, tracking the same rail.
+#   in1_input  CPU core voltage (Vid). Swung 1175 -> 806 mV as CPU load fell,
+#              matching q3_0x36_get_current_cpu_voltage() exactly sample for
+#              sample. This is NOT the SoC rail.
+#
+# That in1 is CPU Vid matters twice over. It is the value upstream warns must
+# never exceed 1325 mV -- they bricked a board that way -- and having it in
+# sysfs means the optimizer can watch it continuously during a benchmark
+# without root and without contending with the governor for the SMU mailbox.
+GPU_VOLTAGE_ATTR = "in0_input"
+CPU_VID_ATTR = "in1_input"
+
+# Upstream bc250_smu_oc: "Always make sure that CPU core voltage (Vid) does not
+# exceed 1.325 V under any circumstances". Deliberately duplicated here rather
+# than read from safety_envelope.yaml: this is a tripwire on what the hardware
+# is *actually doing*, and it must still fire if the envelope is missing,
+# misconfigured, or loosened. The envelope governs what we ask for; this
+# observes what happened.
+VID_DANGER_MV = 1325
 
 
 @dataclass
@@ -51,11 +73,11 @@ class Telemetry:
     gpu_clock_floor_mhz: int | None = None
     gpu_clock_ceiling_mhz: int | None = None
     gpu_busy_percent: int | None = None
-    gfx_voltage_mv: int | None = None
-    soc_voltage_mv: int | None = None
+    gpu_voltage_mv: int | None = None
     performance_level: str | None = None
 
     cpu_temp_c: float | None = None
+    cpu_vid_mv: int | None = None
     cpu_clocks_mhz: list[float] = field(default_factory=list)
 
     fans: list[FanReading] = field(default_factory=list)
@@ -150,8 +172,19 @@ def collect() -> Telemetry:
     else:
         reading.gpu_temp_c = sysfs.hwmon_millicelsius(gpu_hwmon, "temp1_input")
         reading.gpu_power_w = sysfs.hwmon_microwatts(gpu_hwmon, "power1_average")
-        reading.gfx_voltage_mv = sysfs.read_int(gpu_hwmon / GFX_VOLTAGE_ATTR)
-        reading.soc_voltage_mv = sysfs.read_int(gpu_hwmon / SOC_VOLTAGE_ATTR)
+        reading.gpu_voltage_mv = sysfs.read_int(gpu_hwmon / GPU_VOLTAGE_ATTR)
+        reading.cpu_vid_mv = sysfs.read_int(gpu_hwmon / CPU_VID_ATTR)
+
+        if reading.cpu_vid_mv is not None and reading.cpu_vid_mv > VID_DANGER_MV:
+            # Nothing this software applies should be able to reach here, so if
+            # it does, something outside our control is driving Vid past the
+            # level upstream documents as having destroyed hardware. Say so
+            # loudly; the caller is expected to stop and revert.
+            reading.warnings.append(
+                f"DANGER: CPU Vid is {reading.cpu_vid_mv} mV, above the "
+                f"{VID_DANGER_MV} mV level upstream documents as destroying a "
+                "BC-250. Revert to stock and investigate before continuing."
+            )
 
     if device is None:
         reading.warnings.append("no amdgpu DRM device found; is this a BC-250?")
