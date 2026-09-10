@@ -5,7 +5,7 @@ after any OS image bump -- several facts here are kernel- and image-specific.
 
 | | |
 |---|---|
-| Access | driven over SSH; passwordless sudo required |
+| Access | driven over SSH; passwordless sudo required (SMU, `umr` and systemd all need root) |
 | OS | Bazzite 43 Kinoite (`bazzite-deck` variant), rpm-ostree, `/usr` immutable |
 | Kernel | `6.17.7-ba29.fc43.bc250cu` -- a BC-250-specific kernel, layered as a LocalOverride |
 | GPU | Cyan Skillfish `1002:13fe` at `01:00.0`, amdgpu, `card1` |
