@@ -83,3 +83,62 @@ zswap.enabled=1 zswap.compressor=zstd zswap.zpool=zsmalloc zswap.max_pool_percen
 Set as persistent rpm-ostree kargs and verified across a reboot. The two do not
 usefully stack -- zram sits at priority 100 and is already compressed RAM, so
 leaving it enabled would have made zswap inert.
+
+## FurMark
+
+Installed at `~/furmark/FurMark_linux64/furmark` (v2.10.2). Three operational
+facts the harness must encode:
+
+**1. It segfaults without an X resource-manager string.** On a freshly started
+XWayland display the RM property is empty, and FurMark's DPI probe passes NULL
+straight to `strlen`:
+
+```
+X11_GetMonitorDPI -> XrmGetStringDatabase -> GetDatabase -> __strlen_avx2   SIGSEGV
+```
+
+Seed it before launching, which is what the operator's own `fmtest.sh` does:
+
+```bash
+echo "Xft.dpi: 96" | xrdb -merge
+```
+
+Unrelated to `--no-score-box`; it crashes identically either way.
+
+**2. It does not reliably exit at `--max-time`.** Runs overshot an 80 s wall
+clock on a 30 s request. The harness must impose its own `timeout`, as
+`fmtest.sh` does with `timeout $((SECS+25))`. A killed run does not append to
+`_scores_maxtime.csv`, so the timeout must be generous enough to let FurMark
+write its result.
+
+**3. Results land in `_scores_maxtime.csv`**, already parseable, no
+`--export-dir` needed:
+
+```
+date,demo,platform,vendor,renderer,api_version,width,height,fullscreen,
+antialiasing,max_time,frames,max_gpu_temp,avg_fps,min_fps,max_fps
+```
+
+Note `frames` is the headline "score"; `avg_fps` is separate. Prior runs at
+1920x1080 on this box: 120 s -> 14602 frames, 121 avg fps, 82 C max; 600 s ->
+73126 frames, 121 avg fps, 83 C max.
+
+Launch environment: `XDG_RUNTIME_DIR=/run/user/1000 DISPLAY=:1`, `cd` into the
+FurMark directory first (it loads `dylibs/` relatively).
+
+## Thermal reality on this unit
+
+Under FurMark at the current 1000-1600 MHz @ 875 mV tune, sustained readings
+were **90-94.75 C GPU** at ~137 W package power, fan at 2777 RPM, with the GPU
+holding only ~772 MHz. Two independent temperature sources agree, so this is
+real.
+
+Two consequences for the optimizer:
+
+- The box is already thermally limited at its current settings. Headroom for a
+  performance-oriented tune is small, and cooling is the binding constraint
+  rather than voltage or frequency.
+- **The SMU reported no throttle flags at 94 C.** The throttle-bit stopping
+  condition cannot be the only signal; the optimizer must also enforce the
+  temperature ceilings in `safety_envelope.yaml` (`optimizer_ceiling_gpu_c`,
+  `abort_gpu_temp_c`), which is why both exist.
