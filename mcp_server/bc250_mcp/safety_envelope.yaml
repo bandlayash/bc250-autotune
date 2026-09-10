@@ -1,0 +1,134 @@
+# BC-250 AutoTune safety envelope
+#
+# The single source of truth for what this software will and will not apply.
+# The MCP server refuses to exceed a `hard_` bound no matter what the caller
+# passes, including with confirm=True. Tune these to your unit; every board is
+# different, and the defaults here are deliberately conservative.
+#
+# Three levels, in increasing severity:
+#
+#   safe_*   Applied without confirmation. The optimizer moves freely in here.
+#   hard_*   Absolute clamp. Values beyond it are rejected, never silently
+#            clipped -- a silent clip would let the agent believe it applied
+#            something it did not, and then attribute the resulting benchmark
+#            to the wrong config.
+#   Between safe_ and hard_ lies the confirm tier: allowed only with
+#            confirm=True, which the optimizer skill surfaces to the user
+#            rather than auto-confirming.
+#
+# Provenance for every number is given inline. "upstream" means it was read out
+# of an upstream tool's source, not its documentation.
+
+version: 1
+
+cpu:
+  # Source: bc250_smu_oc/bc250_limits.py (freq_min/freq_max).
+  # 3500 MHz is stock; below it is not an overclock and the tool refuses it.
+  hard_min_frequency_mhz: 3500
+  hard_max_frequency_mhz: 4500
+  # 4000 MHz @ 1275 mV is the figure upstream's README suggests as a first
+  # target, so treat it as the edge of unattended territory.
+  safe_max_frequency_mhz: 4000
+
+  # Source: bc250_smu_oc/bc250_limits.py (vid_min=950, vid_max=1325).
+  #
+  # DANGER: upstream bricked a board by raising frequency without undervolting
+  # and letting Vid scale uncapped. Their words: "Always make sure that CPU core
+  # voltage (Vid) does not exceed 1.325 V under any circumstances". We set the
+  # hard ceiling at 1300, strictly BELOW upstream's own limit, so that a bug in
+  # this software still cannot reach the documented brick threshold.
+  hard_min_vid_mv: 950
+  hard_max_vid_mv: 1300
+  # Upstream: "To be easy on your system, you should stay below 1300 mV Vid",
+  # and suggests 1275 as the first attempt.
+  safe_max_vid_mv: 1275
+
+  # Source: bc250_smu_oc/bc250_limits.py (scale_min/scale_max). This is the
+  # V/F curve scale passed to q3_0x50_scale_f_vid_curve; more negative is a
+  # deeper undervolt. 0 is stock. Undervolting is the safe direction, so the
+  # whole range is inside the safe tier.
+  hard_min_curve_scale: -50
+  hard_max_curve_scale: 0
+  safe_min_curve_scale: -50
+
+gpu:
+  # Source: pp_dpm_sclk on the test unit reports DPM states 350 / 2230 MHz.
+  # 2230 is the ASIC's own ceiling; asking for more is rejected by the driver
+  # anyway, so there is no reason to let a caller try.
+  hard_min_frequency_mhz: 350
+  hard_max_frequency_mhz: 2230
+  # cyan-skillfish ships safe-points up to 2000 MHz uncommented and leaves
+  # everything above it commented out -- a reasonable read of "tested" versus
+  # "at your own risk".
+  safe_max_frequency_mhz: 2000
+
+  # Source: cyan-skillfish default-config.toml spans 700 mV (@500 MHz) to
+  # 1150 mV (@2400 MHz, commented out). The uncommented curve tops out at
+  # 960 mV @ 2000 MHz.
+  hard_min_voltage_mv: 700
+  hard_max_voltage_mv: 1150
+  safe_max_voltage_mv: 1000
+
+  # Undervolting far enough will hang the GPU rather than damage it, but a hang
+  # mid-benchmark still costs a reboot. 750 mV is below every voltage in the
+  # shipped curve except the 500 MHz idle point.
+  safe_min_voltage_mv: 750
+
+temperature:
+  # Source: cyan-skillfish default-config.toml (throttling = 85,
+  # throttling_recovery = 75).
+  default_gpu_throttle_c: 85
+  default_gpu_recovery_c: 75
+  hard_max_gpu_throttle_c: 95
+
+  # Source: bc250_smu_oc. Stock SMU limit is 100 C; upstream sets 90 by default
+  # and argues explicitly against raising it to mask GPU-load-induced CPU
+  # throttling, since both share a die and a cooler. We keep 100 as the hard
+  # bound because that is the SMU's own limit, but default to 90.
+  default_cpu_max_c: 90
+  hard_max_cpu_max_c: 100
+
+  # The optimizer treats sustained operation above this as the thermal wall and
+  # stops climbing. Set below the throttle point so we back off *before* the
+  # hardware does -- once the SMU is throttling, benchmark numbers no longer
+  # reflect the config under test.
+  optimizer_ceiling_gpu_c: 80
+  optimizer_ceiling_cpu_c: 85
+
+fan:
+  # PWM in sysfs is 0-255, but this is expressed in percent for legibility and
+  # converted at the boundary.
+  #
+  # A BC-250 pulls ~50 W at idle. Never allow a fan curve that stops the fan
+  # entirely: hard_min_pwm_percent is a floor on every point of any curve.
+  hard_min_pwm_percent: 25
+  hard_max_pwm_percent: 100
+  # Above this temperature the fan must be at 100%, whatever curve was asked
+  # for. Enforced as a clamp on the curve, not merely validated.
+  force_full_speed_above_c: 88
+
+benchmark:
+  # A run is abandoned if telemetry crosses these at any point, and the config
+  # under test is rolled back. These are aborts, not targets.
+  abort_gpu_temp_c: 92
+  abort_cpu_temp_c: 95
+  # Longest single benchmark the server will start, so a malformed duration
+  # cannot pin the GPU at full load indefinitely.
+  max_duration_s: 1800
+
+optimizer:
+  # Step sizes. No tool may move more than one step per call -- see Phase 5 of
+  # the build plan. Small steps are what make the search recoverable.
+  gpu_frequency_step_mhz: 50
+  gpu_voltage_step_mv: 25
+  cpu_frequency_step_mhz: 100
+
+  # Consecutive clean benchmark passes before a config is called good.
+  confirmations_required: 1
+  # Minutes the watchdog waits before marking an applied config stable.
+  stability_window_minutes: 10
+
+  # Per-core clock shortfall against the commanded frequency that counts as
+  # clock stretching. Source: bc250-detect uses a 50 MHz threshold for exactly
+  # this check.
+  clock_stretch_threshold_mhz: 50
