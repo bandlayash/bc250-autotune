@@ -23,7 +23,16 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
-from . import apply, cpu_oc, cu_config, envelope, governor, snapshots, telemetry
+from . import (
+    apply,
+    benchmark,
+    cpu_oc,
+    cu_config,
+    envelope,
+    governor,
+    snapshots,
+    telemetry,
+)
 
 mcp = MCPServer("bc250-autotune")
 
@@ -149,7 +158,7 @@ def get_server_status() -> dict[str, Any]:
     reading = telemetry.collect()
 
     return {
-        "phase": "2 (guarded writes + watchdog)",
+        "phase": "3 (benchmark harness)",
         "dry_run": _dry_run(),
         "writes_implemented": True,
         "governor_backend": state.backend,
@@ -283,6 +292,85 @@ def get_watchdog_status() -> dict[str, Any]:
         "watchdog_unit_installed": unit_installed,
         "unattended_revert_ready": not problems,
         "problems": problems,
+    }
+
+
+@mcp.tool(annotations=READ_ONLY)
+def get_benchmark_environment() -> dict[str, Any]:
+    """Check whether a benchmark can run right now, and report what is missing.
+
+    Call this before `run_benchmark` on a new box. FurMark needs a reachable X
+    display even when driven over SSH, plus `xrdb` (without it FurMark
+    segfaults on a fresh XWayland display) and a screenshot tool.
+    """
+    return benchmark.environment_report()
+
+
+@mcp.tool(annotations=MUTATING)
+def run_benchmark(
+    config_label: str,
+    duration_s: int,
+    width: int = 1920,
+    height: int = 1080,
+) -> dict[str, Any]:
+    """Run a FurMark pass under the current config and record the result.
+
+    Blocks for roughly `duration_s`. Loads the GPU to its limit, so only run
+    this after applying a config through the guarded write tools -- every row
+    is tied to a known, snapshotted configuration.
+
+    Telemetry is sampled every second throughout and the run is **aborted** if
+    the GPU crosses `benchmark.abort_gpu_temp_c` in the safety envelope. That
+    ceiling matters on this hardware: the test unit reaches 90-95 C under
+    FurMark while the SMU reports no throttle flags at all, so temperature is
+    the only reliable stop signal.
+
+    Returns the parsed result including `score_frames`, fps, temperature and
+    power summaries, observed throttle flags, and a screenshot path. A row is
+    appended to benchmarks/results.jsonl regardless of outcome, so an aborted
+    run is recorded rather than lost.
+    """
+    try:
+        return benchmark.run(
+            config_label, duration_s, width=width, height=height
+        ).to_dict()
+    except (benchmark.BenchmarkError, envelope.EnvelopeError) as exc:
+        return {"config_label": config_label, "completed": False, "error": str(exc)}
+
+
+@mcp.tool(annotations=READ_ONLY)
+def get_benchmark_result(run_id: str) -> dict[str, Any]:
+    """Fetch a recorded benchmark result by run_id."""
+    row = benchmark.get_result(run_id)
+    if row is None:
+        return {"run_id": run_id, "found": False}
+    return {"found": True, **row}
+
+
+@mcp.tool(annotations=READ_ONLY)
+def list_benchmark_results(limit: int = 20) -> dict[str, Any]:
+    """List recorded benchmark runs, most recent last.
+
+    Use this to compare a tuned config against the `stock` baseline rather than
+    relying on remembered numbers.
+    """
+    rows = benchmark.load_results()
+    trimmed = rows[-limit:] if limit > 0 else rows
+    return {
+        "results_file": str(benchmark.results_path()),
+        "total": len(rows),
+        "results": [
+            {
+                key: row.get(key)
+                for key in (
+                    "run_id", "config_label", "iso_time", "duration_s",
+                    "completed", "aborted", "score_frames", "avg_fps",
+                    "avg_temp_c", "max_temp_c", "avg_power_w", "avg_clock_mhz",
+                    "gpu_range_mhz", "thermally_throttled", "screenshot_path",
+                )
+            }
+            for row in trimmed
+        ],
     }
 
 
