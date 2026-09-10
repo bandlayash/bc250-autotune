@@ -89,11 +89,15 @@ temperature:
   hard_max_cpu_max_c: 100
 
   # The optimizer treats sustained operation above this as the thermal wall and
-  # stops climbing. Set below the throttle point so we back off *before* the
-  # hardware does -- once the SMU is throttling, benchmark numbers no longer
-  # reflect the config under test.
-  optimizer_ceiling_gpu_c: 80
-  optimizer_ceiling_cpu_c: 85
+  # stops climbing. Set below the abort point so tuning backs off well before
+  # the run is killed.
+  #
+  # Calibrated against this specific unit rather than guessed. Under FurMark it
+  # averages 87 C and peaks 92-95 C at its *stock* configuration, so the
+  # original 80 C ceiling sat below the box's normal loaded temperature and
+  # would have stopped the optimizer before it could measure anything at all.
+  optimizer_ceiling_gpu_c: 90
+  optimizer_ceiling_cpu_c: 88
 
 fan:
   # PWM in sysfs is 0-255, but this is expressed in percent for legibility and
@@ -110,8 +114,18 @@ fan:
 benchmark:
   # A run is abandoned if telemetry crosses these at any point, and the config
   # under test is rolled back. These are aborts, not targets.
-  abort_gpu_temp_c: 92
-  abort_cpu_temp_c: 95
+  #
+  # 97 C is set from measured behaviour of the test unit, not from caution in
+  # the abstract. Its own FurMark history peaks at 78, 79, 82, 83, 86 and 95 C
+  # across six runs including two ten-minute passes, so an abort at 92 C sat
+  # inside the board's normal operating band and killed every run -- three of
+  # ours aborted at 92.0-92.25 C, one from a cold 55.5 C start. 97 C clears the
+  # 95 C this board has already survived while staying well under the
+  # ~100-110 C where AMD silicon protects itself.
+  #
+  # Raise this only with equivalent evidence from your own unit.
+  abort_gpu_temp_c: 97
+  abort_cpu_temp_c: 97
   # Longest single benchmark the server will start, so a malformed duration
   # cannot pin the GPU at full load indefinitely.
   max_duration_s: 1800
