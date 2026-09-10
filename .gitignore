@@ -1,7 +1,7 @@
 benchmarks/raw/*
 !benchmarks/raw/.gitkeep
-!benchmarks/raw/20260910-004849-stock/
-!benchmarks/raw/20260910-004450-tuned-1650/
+!benchmarks/raw/20260910-144633-stock-final/
+!benchmarks/raw/20260910-144925-tuned-final/
 snapshots/
 __pycache__/
 *.pyc

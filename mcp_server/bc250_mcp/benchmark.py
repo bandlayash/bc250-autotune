@@ -76,9 +76,18 @@ KILL_GRACE_S = 25
 #
 # Without this gate, a tuning session would attribute thermal drift to the
 # config change it just made.
-COOLDOWN_TARGET_C = 65.0
-COOLDOWN_TIMEOUT_S = 600
+#
+# 65 C proved too loose. Three runs of the SAME config scored 12261, 12199 and
+# 10843 -- an 11% spread -- and the outlier is the one that started at 62.25 C
+# against 54.5 and 55.5 C for the other two. All three passed a 65 C gate. On a
+# board this thermally bound the starting temperature dominates the result, so
+# the target is 60 C and the actual start is recorded on every row.
+COOLDOWN_TARGET_C = 60.0
+COOLDOWN_TIMEOUT_S = 900
 COOLDOWN_POLL_S = 5.0
+# How far above the target a start is still considered comparable. Recorded on
+# every result so an unmatched pair is visible rather than silently averaged.
+COOLDOWN_TOLERANCE_C = 3.0
 # Seconds before the end to grab the screenshot, so the score box is populated
 # but the window has not torn down.
 SCREENSHOT_LEAD_S = 2.0
@@ -237,6 +246,11 @@ class BenchmarkResult:
     # Config this run measured.
     governor_backend: str | None = None
     gpu_range_mhz: dict[str, int | None] = field(default_factory=dict)
+    # Recorded explicitly rather than inferred from the run label. Voltage is
+    # the variable that mattered most on the reference unit -- the undervolt
+    # beat stock on every metric -- so a result that does not carry it is not
+    # self-describing.
+    gpu_voltage_mv: dict[str, int | None] = field(default_factory=dict)
 
     screenshot_path: str | None = None
     samples_path: str | None = None
@@ -673,6 +687,10 @@ def run(
         height=height,
         governor_backend=state.backend,
         gpu_range_mhz={"min": state.min_freq_mhz, "max": state.max_freq_mhz},
+        gpu_voltage_mv={
+            "min": state.curve[0].voltage_mv if state.curve else None,
+            "max": state.curve[-1].voltage_mv if state.curve else None,
+        },
     )
 
     if cooldown:
