@@ -1,0 +1,25 @@
+[Unit]
+Description=BC-250 AutoTune boot watchdog (revert unproven tuning configs)
+Documentation=https://github.com/yb/bc250-autotune
+# Must settle the config before anything consumes it. The governors are
+# WantedBy=default.target / multi-user.target, so ordering before those and
+# after the hardware is up gives us the window to revert first.
+After=local-fs.target systemd-modules-load.service
+Before=oberon-governor.service cyan-skillfish-governor-smu.service bc250-smu-oc.service
+Wants=local-fs.target
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# --boot reverts to last_good if the previous session left an unproven config.
+ExecStart=/usr/bin/python3 /opt/bc250-autotune/watchdog/watchdog.py --boot
+# A failure here must not strand the boot: the box should still come up so the
+# operator can log in and fix things by hand.
+SuccessExitStatus=0 1
+TimeoutStartSec=120
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=sysinit.target

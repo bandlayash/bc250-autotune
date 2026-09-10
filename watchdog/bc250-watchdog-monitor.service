@@ -1,0 +1,14 @@
+[Unit]
+Description=BC-250 AutoTune stability monitor (promote a config that survives)
+Documentation=https://github.com/yb/bc250-autotune
+After=bc250-watchdog.service
+
+[Service]
+Type=oneshot
+# Waits out the stability window, then promotes the pending config to
+# last_good. Started by the MCP server after it applies a config; harmless to
+# run when nothing is pending (exits immediately).
+ExecStart=/usr/bin/python3 /opt/bc250-autotune/watchdog/watchdog.py --monitor
+TimeoutStartSec=3600
+StandardOutput=journal
+StandardError=journal

@@ -1,8 +1,8 @@
 """MCP entrypoint for BC-250 AutoTune (stdio transport).
 
-Phase 1: read-only. Nothing here writes to hardware, so it is safe to point a
-client at this server on a machine you care about. Guarded writes arrive in
-Phase 2 behind the safety envelope and an explicit confirm flag.
+Phase 2: read-only tools plus guarded writes. Every write is gated by
+safety_envelope.yaml, limited to one step per call, and snapshotted to disk
+before the hardware is touched so the boot watchdog can revert it.
 
 Run with::
 
@@ -15,13 +15,15 @@ still give the agent the sensors it does have.
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
-from . import cpu_oc, cu_config, envelope, governor, telemetry
+from . import apply, cpu_oc, cu_config, envelope, governor, snapshots, telemetry
 
 mcp = MCPServer("bc250-autotune")
 
@@ -147,9 +149,9 @@ def get_server_status() -> dict[str, Any]:
     reading = telemetry.collect()
 
     return {
-        "phase": "1 (read-only)",
+        "phase": "2 (guarded writes + watchdog)",
         "dry_run": _dry_run(),
-        "writes_implemented": False,
+        "writes_implemented": True,
         "governor_backend": state.backend,
         "governor_active": state.active,
         "supports_live_control": state.supports_live_control,
@@ -162,6 +164,125 @@ def get_server_status() -> dict[str, Any]:
             "cpu_temp": reading.cpu_temp_c is not None,
         },
         "warnings": sorted(set(state.warnings + cpu.warnings + reading.warnings)),
+    }
+
+
+# Phase 2 writes. Marked destructive so a client can prompt on them, and
+# non-idempotent because each call steps the config rather than setting an
+# absolute state the caller can safely repeat.
+MUTATING = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False)
+
+# Rollback and snapshot are safe to repeat: both converge on a known state.
+RECOVERY = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True)
+
+
+@mcp.tool(annotations=RECOVERY)
+def snapshot_config(label: str) -> dict[str, Any]:
+    """Capture the current tuning configuration so it can be restored later.
+
+    Stores the verbatim contents of every relevant config file plus live state,
+    under a location the boot watchdog can read as root. Take one before any
+    tuning session; `set_gpu_range` also snapshots automatically before each
+    write, so you rarely need to call this by hand mid-session.
+    """
+    try:
+        return snapshots.capture_and_save(label)
+    except snapshots.SnapshotError as exc:
+        return {"label": label, "saved": False, "error": str(exc)}
+
+
+@mcp.tool(annotations=READ_ONLY)
+def list_snapshots() -> dict[str, Any]:
+    """List saved configuration snapshots available to `rollback`."""
+    return {"state_root": str(snapshots.state_root()), "snapshots": snapshots.list_snapshots()}
+
+
+@mcp.tool(annotations=MUTATING)
+def set_gpu_range(min_mhz: int, max_mhz: int, confirm: bool = False) -> dict[str, Any]:
+    """Set the GPU frequency window. The primary GPU tuning knob.
+
+    Guarded three ways, and none can be bypassed:
+
+    - Values beyond a `hard_` bound in the safety envelope are refused outright,
+      even with confirm=True.
+    - Values above a `safe_` bound require confirm=True. Surface that to the
+      user rather than auto-confirming.
+    - No call may move the ceiling more than one step (default 50 MHz) from
+      where it is now. Step gradually.
+
+    A snapshot and a watchdog pending-marker are written to disk before the
+    hardware is touched, so a config that hangs the box is reverted on the next
+    boot. Call `mark_stable` once a config has proven itself, or `rollback` to
+    undo it now.
+
+    On oberon this rewrites /etc/oberon-config.yaml and restarts the daemon, and
+    is persistent. On cyan-skillfish it uses D-Bus and is volatile.
+    """
+    return apply.set_gpu_range(min_mhz, max_mhz, confirm=confirm)
+
+
+@mcp.tool(annotations=RECOVERY)
+def rollback(to: str = "last_good", dry_run: bool = False) -> dict[str, Any]:
+    """Restore a saved snapshot and clear the watchdog's pending marker.
+
+    Never gated on confirm: getting back to a known-good state must not be
+    harder than leaving it. Pass dry_run=True to see exactly what would change
+    without changing it. Returns a per-step report; a partly-failed restore
+    reports which steps failed rather than silently half-applying.
+    """
+    return apply.rollback(to, dry_run=dry_run)
+
+
+@mcp.tool(annotations=RECOVERY)
+def mark_stable() -> dict[str, Any]:
+    """Promote the current config to `last_good` after it has proven stable.
+
+    Refuses while the GPU is thermally throttling, since a config that is
+    throttling right now has not proven anything. Until this is called, the
+    watchdog treats the applied config as unproven and reverts it on the next
+    boot.
+    """
+    return apply.mark_stable()
+
+
+@mcp.tool(annotations=READ_ONLY)
+def get_watchdog_status() -> dict[str, Any]:
+    """Report whether a config is pending, and whether unattended revert works.
+
+    `pending` non-null means a config was applied and has not been marked
+    stable, so the watchdog will revert it on the next boot. Check
+    `unattended_revert_ready` before starting an unattended tuning run.
+    """
+    root = snapshots.state_root()
+    pending_path = root / "pending.json"
+    pending: dict[str, Any] | None = None
+    try:
+        pending = json.loads(pending_path.read_text())
+    except (OSError, ValueError):
+        pending = None
+
+    labels = [s["label"] for s in snapshots.list_snapshots()]
+    unit_installed = Path("/etc/systemd/system/bc250-watchdog.service").exists()
+
+    problems: list[str] = []
+    if snapshots.LAST_GOOD_LABEL not in labels:
+        problems.append(
+            f"no {snapshots.LAST_GOOD_LABEL!r} snapshot; there is nothing to revert to"
+        )
+    if root != snapshots.SYSTEM_STATE_ROOT:
+        problems.append(
+            f"snapshots are in {root}, which the boot watchdog does not read"
+        )
+    if not unit_installed:
+        problems.append("bc250-watchdog.service is not installed")
+
+    return {
+        "state_root": str(root),
+        "pending": pending,
+        "snapshots": labels,
+        "watchdog_unit_installed": unit_installed,
+        "unattended_revert_ready": not problems,
+        "problems": problems,
     }
 
 
