@@ -182,10 +182,32 @@ in-tree modules. Secure Boot is disabled and `sig_enforce` is `N`, so the
 unsigned module loads.
 
 **The module cannot live where modprobe looks for it.** `/usr/lib/modules` is
-part of the read-only ostree. It is kept in `/var/lib/bc250-autotune/modules/`
-and loaded by absolute path from a systemd unit ordered before the governor,
-with `nct6683` blacklisted in `/etc/modprobe.d` so the in-tree driver does not
-claim the chip first.
+part of the read-only ostree, so the module is kept in
+`/var/lib/bc250-autotune/modules/` and insmod-ed by absolute path from a
+systemd unit, with `nct6683` blacklisted in `/etc/modprobe.d`.
+
+**Three further traps, each found only by actually rebooting.** A unit that
+merely appears to work is not evidence:
+
+- **Mount ordering.** `/var` is a separate subvolume mounted after early boot.
+  A unit with `DefaultDependencies=no` wanted by `sysinit.target` runs before
+  that mount exists and insmod fails with `ENOENT`. Use
+  `RequiresMountsFor=/var/lib/bc250-autotune` and `After=local-fs.target`.
+- **SELinux blocks the module.** A file under `/var/lib` inherits `var_lib_t`,
+  and the kernel refuses to load it with `EACCES` **and no audit record**,
+  which makes it look like a permissions bug that it is not. In-tree modules
+  carry `modules_object_t`; relabel to match.
+- **SELinux blocks the loader too.** systemd (`init_t`) cannot execute a script
+  labelled `var_lib_t`. Install it to `/usr/local/bin`, which is `bin_t` and,
+  on ostree, a symlink to the writable `/var/usrlocal`.
+
+Do not use `SuccessExitStatus=` to paper over insmod failures. Combined with
+`RemainAfterExit=yes` it made a broken unit report `active`, which hid the
+fault for an entire reboot cycle and made a later `systemctl start` a silent
+no-op.
+
+`fan/install-nct6687.sh` in this repository performs all of the above and
+verifies the result.
 
 Verified working: `pwm1` changed from `-r--r--r--` to `-rw-r--r--`,
 `pwm*_enable` appeared across six channels, and writes move the fan —

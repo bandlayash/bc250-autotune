@@ -167,6 +167,29 @@ Set `DRY_RUN=1` in the environment to exercise the whole loop — envelope
 checks, step limits, snapshots — without touching hardware. Refusals are still
 refusals in dry run, so the rehearsal does not lie to you.
 
+## Optional: fan control
+
+Fan control needs the out-of-tree
+[`nct6687d`](https://github.com/Fred78290/nct6687d) module — the in-tree
+`nct6683` driver exposes PWM read-only. On an immutable distro this is fiddly
+(read-only `/usr`, possibly no matching `kernel-devel`, and SELinux blocking
+both the module and its loader), so it is scripted:
+
+```bash
+sudo true            # the script uses sudo throughout
+fan/install-nct6687.sh
+```
+
+It builds against the running kernel, verifies the vermagic matches, installs a
+systemd unit, and confirms PWM became writable. **Re-run it after any kernel
+change** — vermagic is pinned to one release and the module will silently
+refuse to load against another.
+
+Check the result with `get_fan_state()`; `controllable` tells you whether it
+worked. Note that fan control is not guaranteed to buy performance: on the
+reference unit the chip's automatic curve already runs the fan at 100%, so
+there was nothing to gain.
+
 ## Install the watchdog (do this before any unattended tuning)
 
 This is what reverts a configuration that hangs the machine. It runs as a

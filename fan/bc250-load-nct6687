@@ -1,0 +1,28 @@
+#!/bin/sh
+# Load the out-of-tree nct6687 driver for BC-250 fan control.
+#
+# Idempotent: already-loaded is success. Anything else is a real failure and is
+# reported as one -- masking errors here previously made a broken unit report
+# "active" and hid the fault for a whole reboot cycle.
+set -eu
+MODULE="/var/lib/bc250-autotune/modules/nct6687-$(uname -r).ko"
+
+if lsmod | grep -q '^nct6687[[:space:]]'; then
+    echo "nct6687 already loaded"
+    exit 0
+fi
+
+if [ ! -f "$MODULE" ]; then
+    echo "no module built for kernel $(uname -r): $MODULE" >&2
+    echo "vermagic is pinned to one kernel release -- rebuild after a kernel change" >&2
+    exit 1
+fi
+
+# SELinux: a module under /var/lib inherits var_lib_t, and the kernel refuses to
+# load it (EACCES, with no audit record). In-tree modules carry
+# modules_object_t; match that. Relabelling is idempotent and cheap.
+if command -v chcon >/dev/null 2>&1; then
+    chcon -t modules_object_t "$MODULE" 2>/dev/null || true
+fi
+
+exec insmod "$MODULE"

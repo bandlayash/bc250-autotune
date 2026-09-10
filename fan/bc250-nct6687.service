@@ -1,0 +1,23 @@
+[Unit]
+Description=Load out-of-tree nct6687 driver (BC-250 fan control)
+Documentation=https://github.com/Fred78290/nct6687d
+# The module lives under /var, a separate subvolume on an rpm-ostree system
+# that is mounted after early boot. Without this the unit runs before the mount
+# exists and insmod fails with ENOENT -- observed on a real reboot.
+RequiresMountsFor=/var/lib/bc250-autotune
+After=local-fs.target
+# Ahead of the tuning stack, so telemetry and snapshots see fan control.
+Before=bc250-watchdog.service oberon-governor.service cyan-skillfish-governor-smu.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Idempotent, and a genuine failure still fails. SuccessExitStatus was masking
+# real errors here: a missing file looked like success, the unit reported
+# active, and a later "systemctl start" became a no-op that fixed nothing.
+ExecStart=/usr/local/bin/bc250-load-nct6687
+ExecStop=-/usr/sbin/rmmod nct6687
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target
