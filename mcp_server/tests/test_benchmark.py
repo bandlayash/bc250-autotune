@@ -29,58 +29,61 @@ def bench_root(tmp_path, monkeypatch):
     return tmp_path
 
 
-class TestFurmarkRowParsing:
-    """FurMark writes this file UNQUOTED, with commas inside the renderer field.
+QUICK_STATS = """[ Demo Quick Stats ]
+- demo                 : FurMark (GL) (built-in: YES)
+- renderer             : AMD BC-250 (radeonsi, gfx1013, ACO, DRM 3.64, 6.17.7)
+- 3D API               : OpenGL 4.6 (Core Profile) Mesa 26.0.4
+- resolution           : 1280x720
+- SCORE                : 4388
+- duration             : 20000 ms
+- FPS (min/avg/max)    : 201 / 219 / 223
+- GPU 0:  [1002-13FE]
+  .max temperature: 90C
+  .max core clock: 49 MHz
+  .min core clock: 2 MHz
+"""
 
-    A real row therefore has 20 comma-separated fields against a 16-column
-    header, and any header-position parse mis-maps every number. Parsing from
-    the end is what makes it reliable.
-    """
 
-    def test_real_row_with_commas_in_the_renderer(self):
-        """Verbatim from the test unit. Header-position parsing read max_time as
-        1920 (the width) and frames as 1080 (the height)."""
-        row = benchmark.parse_scores_row(REAL_ROW)
+class TestQuickStatsParsing:
+    """FurMark prints results to stdout; it writes no CSV for --benchmark runs."""
+
+    def test_parses_a_real_block(self):
+        stats = benchmark.parse_quick_stats(QUICK_STATS)
+        assert stats["score"] == "4388"
+        assert stats["duration_ms"] == "20000"
+        assert stats["resolution"] == "1280x720"
+        assert (stats["min_fps"], stats["avg_fps"], stats["max_fps"]) == (201.0, 219.0, 223.0)
+        assert stats["max_temperature"] == "90"
+
+    def test_applies_to_a_result(self):
         result = BenchmarkResult(run_id="r", config_label="c")
-        benchmark._apply_furmark_row(row, result)
+        benchmark._apply_quick_stats(benchmark.parse_quick_stats(QUICK_STATS), result)
+        assert result.score_frames == 4388
+        assert result.avg_fps == 219.0
+        assert result.min_fps == 201.0
+        assert result.max_fps == 223.0
+        assert result.furmark_max_gpu_temp_c == 90
 
-        assert row["width"] == "1920"
-        assert row["height"] == "1080"
-        assert row["max_time"] == "600"
-        assert result.score_frames == 73126
-        assert result.avg_fps == 121
-        assert result.min_fps == 112
-        assert result.max_fps == 125
-        assert result.furmark_max_gpu_temp_c == 83
+    def test_incomplete_output_yields_nothing(self):
+        """Absence of the block is how the run loop knows work is still going."""
+        partial = "[ Demo Quick Stats ]\n- demo : FurMark (GL)\n"
+        assert benchmark.parse_quick_stats(partial).get("score") is None
+        assert benchmark.parse_quick_stats("") == {}
+        assert benchmark.parse_quick_stats("starting up...") == {}
 
-    def test_extra_commas_do_not_shift_the_numeric_tail(self):
-        """However many commas the driver adds, the last ten fields are fixed."""
-        noisy = REAL_ROW.replace(
-            "AMD BC-250 (radeonsi", "AMD BC-250 (radeonsi, extra, more, fields"
-        )
-        row = benchmark.parse_scores_row(noisy)
-        assert row["max_time"] == "600"
-        assert row["frames"] == "73126"
-        assert row["max_fps"] == "125"
+    def test_commas_in_the_renderer_are_harmless(self):
+        """The field that broke CSV parsing is irrelevant to a line-based parse."""
+        assert benchmark.parse_quick_stats(QUICK_STATS)["score"] == "4388"
 
-    def test_header_line_is_not_treated_as_data(self, tmp_path):
-        path = tmp_path / "_scores_maxtime.csv"
-        path.write_text(SCORES_HEADER + "\n" + REAL_ROW + "\n")
-        rows = benchmark._read_scores_rows(path)
-        assert len(rows) == 1
-        assert benchmark.parse_scores_row(rows[0])["frames"] == "73126"
+    def test_preamble_before_the_block_is_ignored(self):
+        noisy = "loading shaders\nGL_VENDOR: AMD\n" + QUICK_STATS
+        assert benchmark.parse_quick_stats(noisy)["score"] == "4388"
 
-    def test_short_row_yields_nothing_rather_than_wrong_numbers(self):
-        assert benchmark.parse_scores_row("a,b,c") == {}
-
-    def test_blank_and_malformed_fields_become_none(self):
+    def test_missing_fields_do_not_raise(self):
         result = BenchmarkResult(run_id="r", config_label="c")
-        benchmark._apply_furmark_row(
-            {"frames": "", "avg_fps": "n/a", "min_fps": None}, result
-        )
+        benchmark._apply_quick_stats({"score": "not-a-number"}, result)
         assert result.score_frames is None
         assert result.avg_fps is None
-        assert result.min_fps is None
 
 
 class TestSummarise:

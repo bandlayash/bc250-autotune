@@ -19,11 +19,16 @@ it crashes identically either way.
 wall clock. The harness imposes its own deadline and kills the process, which is
 also what the operator's own script does.
 
-**Its results land in ``_scores_maxtime.csv``** inside the FurMark directory,
-already parsed and complete -- no ``--export-dir`` needed. The row is appended
-when the timed demo finishes, before the process gets around to exiting, so a
-killed run still records its result. New rows are detected by counting, since
-the file accumulates across runs.
+**Its results are printed to stdout, not written to a CSV.** A ``--benchmark``
+run emits a ``[ Demo Quick Stats ]`` block carrying the SCORE and FPS figures,
+and touches ``_scores_maxtime.csv`` not at all. The block is emitted before the
+process hangs, so watching the log both yields the result and tells us when the
+run is genuinely finished.
+
+**``--max-time`` is in SECONDS and ``--benchmark`` is required.** Without
+``--benchmark`` the run is a stress test and produces no score at all. The
+build plan specified ``--max-time <duration_ms>``; passing milliseconds asks
+for a run a thousand times too long, which simply never finishes.
 
 Safety: telemetry is sampled continuously and the run is **aborted** if the GPU
 crosses ``benchmark.abort_gpu_temp_c``. The test unit reaches 90-95 C under
@@ -35,6 +40,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -49,7 +55,6 @@ BENCH_ROOT_ENV = "BC250_BENCH_ROOT"
 FURMARK_DIR_ENV = "BC250_FURMARK_DIR"
 DISPLAY_ENV = "BC250_BENCH_DISPLAY"
 
-SCORES_CSV = "_scores_maxtime.csv"
 RESULTS_FILE = "results.jsonl"
 
 DEFAULT_DEMO = "furmark-gl"
@@ -360,14 +365,26 @@ def capture_screenshot(display: str, target: Path) -> tuple[bool, str]:
     env = _launch_env(display)
 
     attempts: list[tuple[str, list[str]]] = []
-    if shutil.which("import"):
-        attempts.append(("import", ["import", "-window", "root", str(target)]))
+
+    # ffmpeg x11grab first. ImageMagick's `import` is present but broken on
+    # this box -- every invocation fails with "missing an image filename",
+    # including a trivial one, so it is not a path-quoting problem. grim, scrot,
+    # xwd and maim are all absent. spectacle exists but is a KDE GUI tool that
+    # simply blocks for the full timeout when driven headless.
+    if shutil.which("ffmpeg"):
+        attempts.append((
+            "ffmpeg",
+            ["ffmpeg", "-loglevel", "error", "-f", "x11grab",
+             "-i", display, "-frames:v", "1", "-y", str(target)],
+        ))
     if shutil.which("grim") and os.environ.get("WAYLAND_DISPLAY"):
         attempts.append(("grim", ["grim", str(target)]))
+    if shutil.which("maim"):
+        attempts.append(("maim", ["maim", str(target)]))
     if shutil.which("scrot"):
         attempts.append(("scrot", ["scrot", "-o", str(target)]))
-    if shutil.which("spectacle"):
-        attempts.append(("spectacle", ["spectacle", "-b", "-n", "-o", str(target)]))
+    if shutil.which("import"):
+        attempts.append(("import", ["import", "-window", "root", str(target)]))
 
     if not attempts:
         return False, "no screenshot tool found (tried import, grim, scrot, spectacle)"
@@ -387,12 +404,33 @@ def capture_screenshot(display: str, target: Path) -> tuple[bool, str]:
     return False, "; ".join(errors)
 
 
-# The trailing columns of a FurMark results row, in order. Everything before
-# these is descriptive text of unpredictable width -- see parse_scores_row.
-TRAILING_COLUMNS = (
-    "width", "height", "fullscreen", "antialiasing", "max_time",
-    "frames", "max_gpu_temp", "avg_fps", "min_fps", "max_fps",
-)
+QUICK_STATS_MARKER = "[ Demo Quick Stats ]"
+
+# FurMark prints its result to stdout as a "Demo Quick Stats" block::
+#
+#     [ Demo Quick Stats ]
+#     - demo                 : FurMark (GL) (built-in: YES)
+#     - resolution           : 1280x720
+#     - SCORE                : 4388
+#     - duration             : 20000 ms
+#     - FPS (min/avg/max)    : 201 / 219 / 223
+#     - GPU 0:  [1002-13FE]
+#       .max temperature: 90 C
+#
+# This is parsed instead of ``_scores_maxtime.csv``. The CSV is not written at
+# all for ``--benchmark`` runs on this build -- only ``_furmark_log.txt`` was
+# touched -- and it is a shared append-only file that several runs race over.
+# The stdout block belongs to exactly one run, carries the SCORE the CSV lacks,
+# and is emitted even though the process then hangs instead of exiting.
+_STAT_PATTERNS: dict[str, str] = {
+    "score": r"-\s*SCORE\s*:\s*([0-9]+)",
+    "duration_ms": r"-\s*duration\s*:\s*([0-9]+)\s*ms",
+    "resolution": r"-\s*resolution\s*:\s*(\S+)",
+    "renderer": r"-\s*renderer\s*:\s*(.+)",
+    "api": r"-\s*3D API\s*:\s*(.+)",
+    "max_temperature": r"\.max temperature\s*:\s*([0-9]+)",
+}
+_FPS_PATTERN = r"-\s*FPS \(min/avg/max\)\s*:\s*([0-9.]+)\s*/\s*([0-9.]+)\s*/\s*([0-9.]+)"
 
 
 def wait_for_cooldown(
@@ -448,63 +486,45 @@ def wait_for_cooldown(
     }
 
 
-def _read_scores_rows(path: Path) -> list[str]:
-    """Return the data lines of the scores CSV, header excluded."""
-    try:
-        lines = [
-            line.strip()
-            for line in path.read_text(errors="replace").splitlines()
-            if line.strip()
-        ]
-    except OSError:
-        return []
-    # Drop the header if present.
-    return [line for line in lines if not line.startswith("date,")]
+def parse_quick_stats(text: str) -> dict[str, Any]:
+    """Extract FurMark's result block from its stdout.
 
-
-def parse_scores_row(line: str) -> dict[str, str]:
-    """Parse one FurMark results line, counting from the END.
-
-    FurMark writes this file **unquoted**, and its ``renderer`` field contains
-    commas of its own::
-
-        ...,AMD,AMD BC-250 (radeonsi, gfx1013, ACO, DRM 3.64, 6.17.7-...),...
-
-    so a real row has 20 comma-separated fields against a 16-column header.
-    Parsing by header position therefore mis-maps every numeric field -- it read
-    ``max_time`` as 1920 (the width) and ``frames`` as 1080 (the height).
-    ``csv.DictReader`` does not help: the file is not quoted, so there is
-    nothing for it to disambiguate.
-
-    The descriptive prefix is variable-width but the numeric tail is not, so the
-    last ten fields are mapped positionally. That holds no matter how many
-    commas the driver decides to put in its renderer string.
+    Returns {} if the block has not been printed yet, which is how the run loop
+    detects that the benchmark is still in progress.
     """
-    fields = [field.strip() for field in line.split(",")]
-    if len(fields) < len(TRAILING_COLUMNS):
+    if QUICK_STATS_MARKER not in text:
         return {}
-    tail = fields[-len(TRAILING_COLUMNS):]
-    return dict(zip(TRAILING_COLUMNS, tail))
+
+    block = text[text.index(QUICK_STATS_MARKER):]
+    stats: dict[str, Any] = {}
+
+    for key, pattern in _STAT_PATTERNS.items():
+        match = re.search(pattern, block)
+        if match:
+            stats[key] = match.group(1).strip()
+
+    fps = re.search(_FPS_PATTERN, block)
+    if fps:
+        stats["min_fps"] = float(fps.group(1))
+        stats["avg_fps"] = float(fps.group(2))
+        stats["max_fps"] = float(fps.group(3))
+
+    return stats
 
 
-def _apply_furmark_row(row: dict[str, str], result: BenchmarkResult) -> None:
-    """Fold FurMark's own result row into ours.
-
-    Note ``frames`` is the headline "score"; ``avg_fps`` is a separate column
-    and is not simply score/duration.
-    """
-    def number(key: str, cast=float):
-        raw = (row.get(key) or "").strip()
+def _apply_quick_stats(stats: dict[str, Any], result: BenchmarkResult) -> None:
+    """Fold FurMark's own numbers into the result."""
+    def as_int(key: str) -> int | None:
         try:
-            return cast(raw)
-        except (TypeError, ValueError):
+            return int(stats[key])
+        except (KeyError, TypeError, ValueError):
             return None
 
-    result.score_frames = number("frames", int)
-    result.avg_fps = number("avg_fps")
-    result.min_fps = number("min_fps")
-    result.max_fps = number("max_fps")
-    result.furmark_max_gpu_temp_c = number("max_gpu_temp")
+    result.score_frames = as_int("score")
+    result.avg_fps = stats.get("avg_fps")
+    result.min_fps = stats.get("min_fps")
+    result.max_fps = stats.get("max_fps")
+    result.furmark_max_gpu_temp_c = as_int("max_temperature")
 
 
 def run(
@@ -578,22 +598,29 @@ def run(
     if not seeded:
         result.warnings.append(detail)
 
-    scores_csv = furmark_dir / SCORES_CSV
-    rows_before = len(_read_scores_rows(scores_csv))
-
     sampler = _Sampler(
         abort_gpu_c=float(bench.get("abort_gpu_temp_c", 92)),
         abort_cpu_c=float(bench.get("abort_cpu_temp_c", 95)),
     )
     sampler.start()
 
-    # Score box left enabled on purpose: it is what the screenshot captures.
+    # --benchmark is required to get a SCORE: --max-time alone runs a stress
+    # test, which never produces one.
+    #
+    # --max-time is in SECONDS. The build plan said milliseconds, and passing
+    # duration_s * 1000 asked for a 120,000-second run that of course never
+    # finished -- every early run was killed mid-stress-test with no result.
+    # (--duration-ms is the millisecond-valued flag, if one is ever needed.)
+    #
+    # The score box is left enabled on purpose: it is what the screenshot
+    # captures, and it stays on screen while FurMark hangs after finishing.
     cmd = [
         "./furmark",
         "--demo", demo,
         "--width", str(width),
         "--height", str(height),
-        "--max-time", str(duration_s * 1000),
+        "--benchmark",
+        "--max-time", str(duration_s),
     ]
     log_path = raw_dir / "furmark.log"
 
@@ -610,36 +637,53 @@ def run(
         sampler.stop()
         raise BenchmarkError(f"could not launch FurMark: {exc}") from exc
 
-    deadline = time.time() + duration_s
-    shot_at = deadline - SCREENSHOT_LEAD_S
-    shot_taken = not screenshot
+    # FurMark prints its results and then hangs instead of exiting, so the loop
+    # watches the log for the Quick Stats block rather than waiting on the
+    # process. That also gives the ideal screenshot moment: the score box is on
+    # screen from that instant until we terminate it.
+    deadline = time.time() + duration_s + KILL_GRACE_S
+    stats: dict[str, Any] = {}
+    log_text = ""
 
     while True:
-        if proc.poll() is not None:
-            break
         if sampler.abort_reason:
             result.aborted = True
             result.abort_reason = sampler.abort_reason
             proc.terminate()
             break
-        if not shot_taken and time.time() >= shot_at:
-            ok, detail = capture_screenshot(display, raw_dir / "screenshot.png")
-            shot_taken = True
-            if ok:
-                result.screenshot_path = str(
-                    (raw_dir / "screenshot.png").relative_to(bench_root().parent)
-                )
-            else:
-                result.warnings.append(f"screenshot failed: {detail}")
-        if time.time() >= deadline + KILL_GRACE_S:
-            # Expected: FurMark routinely overshoots its own --max-time.
+
+        try:
+            log_text = log_path.read_text(errors="replace")
+        except OSError:
+            log_text = ""
+
+        stats = parse_quick_stats(log_text)
+        if stats:
+            if screenshot:
+                ok, detail = capture_screenshot(display, raw_dir / "screenshot.png")
+                if ok:
+                    result.screenshot_path = str(
+                        (raw_dir / "screenshot.png").relative_to(bench_root().parent)
+                    )
+                else:
+                    result.warnings.append(f"screenshot failed: {detail}")
             proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
             break
-        time.sleep(0.25)
+
+        if proc.poll() is not None:
+            # Exited without printing results -- usually the SIGSEGV described
+            # at the top of this module.
+            break
+
+        if time.time() >= deadline:
+            result.warnings.append(
+                f"FurMark produced no result within {duration_s + KILL_GRACE_S}s; "
+                "terminating"
+            )
+            proc.terminate()
+            break
+
+        time.sleep(0.5)
 
     try:
         result.furmark_exit_code = proc.wait(timeout=15)
@@ -661,16 +705,19 @@ def run(
     except OSError as exc:
         result.warnings.append(f"could not write samples: {exc}")
 
-    # FurMark appends its row when the timed demo finishes, which happens before
-    # the process gets around to exiting -- so a killed run still has a result.
-    rows_after = _read_scores_rows(scores_csv)
-    if len(rows_after) > rows_before:
-        _apply_furmark_row(parse_scores_row(rows_after[-1]), result)
+    if not stats:
+        try:
+            stats = parse_quick_stats(log_path.read_text(errors="replace"))
+        except OSError:
+            stats = {}
+
+    if stats:
+        _apply_quick_stats(stats, result)
         result.completed = not result.aborted
     else:
         result.warnings.append(
-            f"FurMark wrote no new row to {SCORES_CSV}; the run did not complete "
-            "(check furmark.log -- a SIGSEGV here usually means the X resource "
+            "FurMark printed no Quick Stats block; the run did not complete "
+            "(check furmark.log -- a SIGSEGV there means the X resource "
             "database was empty)"
         )
 
