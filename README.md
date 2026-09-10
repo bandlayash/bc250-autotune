@@ -21,6 +21,10 @@ that reverts an unproven configuration if the machine hangs.
   proven stable — the piece that makes unattended tuning survivable.
 - **Benchmarks** with FurMark, sampling telemetry throughout and aborting on an
   over-temperature.
+- **Controls fans** where the hardware allows it — the in-tree `nct6683` driver
+  exposes PWM read-only, so this needs the out-of-tree
+  [`nct6687d`](https://github.com/Fred78290/nct6687d) module. `get_fan_state()`
+  reports whether your board can do it.
 
 ## Supported governors
 

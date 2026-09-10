@@ -97,8 +97,11 @@ per-channel writability so a rollback reports honestly instead of failing on
 something it could never have changed, and fan curves are the last feature to
 land rather than a dependency of anything else.
 
-This matters more than it sounds: on a thermally bound board, fan speed is the
-only lever that buys real headroom.
+Whether that is worth pursuing is board-specific, and on the reference unit it
+turned out not to be. Once `nct6687d` was built and fan control worked, pinning
+the fan to 100% produced no measurable gain — because the chip's automatic mode
+already runs it at 100% continuously. The fan was never the constraint; the
+cooler is. Fan control there is a noise lever, not a performance one.
 
 ## Compute units and core unlock are read-only
 

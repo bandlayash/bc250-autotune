@@ -31,6 +31,7 @@ from . import (
     cpu_oc,
     cu_config,
     envelope,
+    fan,
     governor,
     snapshots,
     telemetry,
@@ -256,6 +257,47 @@ def set_gpu_config(
     lives in the safe-points curve and is not changed -- the result says so.
     """
     return apply.set_gpu_config(min_mhz, max_mhz, min_mv, max_mv, confirm=confirm)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def get_fan_state() -> dict[str, Any]:
+    """Report fan PWM channels, speeds, and whether fan control is possible.
+
+    `controllable` is the field that matters. It is false under the in-tree
+    `nct6683` driver, which exposes pwmN read-only with no store handler, so
+    writes fail with EACCES even as root. Fan control requires the out-of-tree
+    `nct6687d` module.
+    """
+    return fan.get_state_dict()
+
+
+@mcp.tool(annotations=MUTATING)
+def set_fan_speed(percent: float, confirm: bool = False) -> dict[str, Any]:
+    """Pin the fan to a fixed duty cycle, 0-100%.
+
+    On a thermally bound BC-250 this is the lever that buys real headroom:
+    more airflow means the SMU sustains a higher clock. Worth trying before
+    concluding a board has no performance left.
+
+    The value is **clamped**, not refused: below `fan.hard_min_pwm_percent` it
+    is raised to the floor, because a curve that stops the fan is never
+    acceptable on a board that idles around 50 W. `clamp_notes` in the result
+    says what was changed and why.
+
+    Call `set_fan_automatic` to hand control back to the board.
+    """
+    return fan.set_manual(percent)
+
+
+@mcp.tool(annotations=RECOVERY)
+def set_fan_automatic() -> dict[str, Any]:
+    """Return the fan to the chip's own thermal cruise control.
+
+    The safe resting state. Call this when finished with manual control, and
+    after any tuning session, so the board's built-in curve is in charge rather
+    than a duty this software pinned and then forgot about.
+    """
+    return fan.set_automatic()
 
 
 @mcp.tool(annotations=RECOVERY)

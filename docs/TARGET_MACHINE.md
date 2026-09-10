@@ -142,3 +142,77 @@ Two consequences for the optimizer:
   condition cannot be the only signal; the optimizer must also enforce the
   temperature ceilings in `safety_envelope.yaml` (`optimizer_ceiling_gpu_c`,
   `abort_gpu_temp_c`), which is why both exist.
+
+## Fan control via nct6687d
+
+The in-tree `nct6683` driver binds this board's NCT6686 but exposes `pwmN` as
+mode `0444` with no `pwmN_enable`, so fan control is impossible with a stock
+kernel. The out-of-tree
+[`nct6687d`](https://github.com/Fred78290/nct6687d) module fixes that, and
+builds cleanly against 6.17 — but on an rpm-ostree system with a
+custom-patched kernel there are two obstacles worth writing down.
+
+**The kernel-devel headers do not match the running kernel.** The unit runs a
+BC-250-patched `…bc250cu` kernel installed as an rpm-ostree LocalOverride, but
+only the *stock* `kernel-devel` for the same base version is available;
+`/lib/modules/$(uname -r)/build` is a **dangling symlink** and no matching
+`-devel` package exists in any repo.
+
+Two properties make this recoverable:
+
+- **`CONFIG_MODVERSIONS` is not set**, so no per-symbol CRC matching is
+  required — only the vermagic string has to match.
+- The patches are amdgpu CU-mask changes, unrelated to Super I/O hwmon.
+
+So copy the stock tree somewhere writable (`/usr/src` is read-only) and correct
+its release strings:
+
+```bash
+KREL=$(uname -r)
+sudo cp -a /usr/src/kernels/6.17.7-ba29.fc43.x86_64 /var/lib/bc250-kbuild/$KREL
+echo "$KREL" | sudo tee /var/lib/bc250-kbuild/$KREL/include/config/kernel.release
+printf '#define UTS_RELEASE "%s"\n' "$KREL" \
+  | sudo tee /var/lib/bc250-kbuild/$KREL/include/generated/utsrelease.h
+make -C /var/lib/bc250-kbuild/$KREL M=$PWD modules
+```
+
+The result carries vermagic
+`6.17.7-ba29.fc43.bc250cu.x86_64 SMP preempt mod_unload`, identical to the
+in-tree modules. Secure Boot is disabled and `sig_enforce` is `N`, so the
+unsigned module loads.
+
+**The module cannot live where modprobe looks for it.** `/usr/lib/modules` is
+part of the read-only ostree. It is kept in `/var/lib/bc250-autotune/modules/`
+and loaded by absolute path from a systemd unit ordered before the governor,
+with `nct6683` blacklisted in `/etc/modprobe.d` so the in-tree driver does not
+claim the chip first.
+
+Verified working: `pwm1` changed from `-r--r--r--` to `-rw-r--r--`,
+`pwm*_enable` appeared across six channels, and writes move the fan —
+PWM 255 → 2816 RPM, PWM 153 → 1980 RPM, automatic → 2230 RPM.
+
+> Rebuild after any kernel change. The vermagic is pinned to one kernel
+> release, and the module silently will not load against another.
+
+### Does fan control actually help? On this unit, no.
+
+Fan control works, but buys nothing on this board:
+
+| Run | Fan mode | Peak fan | Start | Score |
+|---|---|---:|---:|---:|
+| tuned | automatic | 2797 RPM | 59.2 °C | 11209 |
+| tuned | manual 100% | 2784 RPM | 55.5 °C | 11760 |
+
+Manual 100% produced *fewer* RPM than automatic did, and the score difference
+sits inside the 10843–12261 spread already measured for this configuration —
+with the faster run also starting 3.7 °C cooler, which dominates results here.
+
+The reason is visible at idle: in automatic mode the chip holds `pwm2` at
+**255 (100%)** continuously, around 2820 RPM. The fan is already pinned at
+maximum by the board's own curve, so there is no airflow left to gain. The
+cooling solution is the constraint, not the fan curve.
+
+Fan control on this unit is therefore a **noise** control — useful for running
+quieter at the cost of temperature — rather than a performance one. A board
+with a different cooler or a gentler default curve may behave differently;
+check `get_fan_state()` before assuming.
