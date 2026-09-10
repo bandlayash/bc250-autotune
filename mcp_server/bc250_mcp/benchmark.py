@@ -354,6 +354,80 @@ class _Sampler(threading.Thread):
         self._stop.set()
 
 
+def find_render_window(display: str) -> str | None:
+    """Locate the demo's X window, so a screenshot captures actual content.
+
+    Matches on name first, then falls back to the largest mapped window --
+    under gamescope the compositor's own helper is a 1x1 stub, so "largest"
+    reliably picks the real one.
+    """
+    if shutil.which("xdotool") is None:
+        return None
+    env = _launch_env(display)
+
+    for args in (
+        ["xdotool", "search", "--name", "(?i)furmark"],
+        ["xdotool", "search", "--class", "(?i)furmark"],
+        ["xdotool", "search", "--onlyvisible", "--name", "."],
+    ):
+        try:
+            proc = subprocess.run(
+                args, env=env, capture_output=True, text=True, timeout=10, check=False
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        ids = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        if not ids:
+            continue
+        if len(ids) == 1:
+            return ids[0]
+        return _largest_window(ids, env) or ids[-1]
+    return None
+
+
+def _largest_window(ids: list[str], env: dict[str, str]) -> str | None:
+    best, best_area = None, 0
+    for window_id in ids:
+        try:
+            proc = subprocess.run(
+                ["xdotool", "getwindowgeometry", "--shell", window_id],
+                env=env, capture_output=True, text=True, timeout=8, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        geometry: dict[str, int] = {}
+        for line in proc.stdout.splitlines():
+            key, _, value = line.partition("=")
+            try:
+                geometry[key.strip()] = int(value)
+            except ValueError:
+                continue
+        area = geometry.get("WIDTH", 0) * geometry.get("HEIGHT", 0)
+        if area > best_area:
+            best, best_area = window_id, area
+    # A 1x1 stub is not a render target.
+    return best if best_area > 1 else None
+
+
+def screenshot_is_blank(path: Path) -> bool:
+    """True if the image is effectively featureless.
+
+    A root grab under gamescope succeeds and writes a valid PNG that happens to
+    be entirely black, so exit status alone cannot tell a good capture from a
+    useless one.
+    """
+    if shutil.which("magick") is None:
+        return False
+    try:
+        proc = subprocess.run(
+            ["magick", str(path), "-format", "%[fx:standard_deviation]", "info:"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        return float(proc.stdout.strip()) < 0.01
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+
+
 def capture_screenshot(display: str, target: Path) -> tuple[bool, str]:
     """Grab the screen, preferring whatever tool the session actually has.
 
@@ -366,14 +440,29 @@ def capture_screenshot(display: str, target: Path) -> tuple[bool, str]:
 
     attempts: list[tuple[str, list[str]]] = []
 
-    # ffmpeg x11grab first. ImageMagick's `import` is present but broken on
-    # this box -- every invocation fails with "missing an image filename",
-    # including a trivial one, so it is not a path-quoting problem. grim, scrot,
-    # xwd and maim are all absent. spectacle exists but is a KDE GUI tool that
-    # simply blocks for the full timeout when driven headless.
+    # Capturing the X *root* yields a black frame under gamescope: it runs
+    # Xwayland rootless, so app windows are redirected to Wayland surfaces and
+    # the root has no content (xwininfo shows a single 1x1 steamcompmgr child).
+    # A root grab produced a 3840x2160 PNG with 49 colours and a mean
+    # brightness of 1.7e-05. Grab the demo's own window instead, and fall back
+    # to the root only if it cannot be located.
+    window_id = find_render_window(display)
+    if shutil.which("ffmpeg") and window_id:
+        attempts.append((
+            "ffmpeg-window",
+            ["ffmpeg", "-loglevel", "error", "-f", "x11grab",
+             "-window_id", window_id, "-i", display,
+             "-frames:v", "1", "-y", str(target)],
+        ))
+
+    # ImageMagick's `import` is present but broken on this box -- every
+    # invocation fails with "missing an image filename", including a trivial
+    # one, so it is not a path-quoting problem. grim, scrot, xwd and maim are
+    # all absent. spectacle exists but is a KDE GUI tool that blocks for its
+    # full timeout when driven headless.
     if shutil.which("ffmpeg"):
         attempts.append((
-            "ffmpeg",
+            "ffmpeg-root",
             ["ffmpeg", "-loglevel", "error", "-f", "x11grab",
              "-i", display, "-frames:v", "1", "-y", str(target)],
         ))
@@ -399,6 +488,11 @@ def capture_screenshot(display: str, target: Path) -> tuple[bool, str]:
             errors.append(f"{name}: {exc}")
             continue
         if proc.returncode == 0 and target.exists() and target.stat().st_size > 0:
+            if screenshot_is_blank(target):
+                # Valid PNG, no content. Keep trying rather than reporting a
+                # success that would put a black rectangle in the README.
+                errors.append(f"{name}: captured but the image is blank")
+                continue
             return True, f"captured with {name} ({target.stat().st_size} bytes)"
         errors.append(f"{name}: rc={proc.returncode} {proc.stderr.decode()[:80]}")
     return False, "; ".join(errors)

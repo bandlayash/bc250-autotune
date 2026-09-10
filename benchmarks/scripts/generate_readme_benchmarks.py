@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,7 @@ def load_results(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     rows: list[dict[str, Any]] = []
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
             continue
@@ -211,10 +212,19 @@ def build_section(rows: list[dict[str, Any]]) -> str:
 
 
 def inject(readme: Path, section: str) -> tuple[bool, str]:
-    """Replace the marked region of the README. Returns (changed, message)."""
+    """Replace the marked region of the README. Returns (changed, message).
+
+    Reads and writes UTF-8 explicitly, and writes atomically. Both matter, and
+    the first bug found here proved why: on a Windows checkout the default
+    cp1252 encoding raised UnicodeEncodeError on the ``▲`` delta arrows *after*
+    ``write_text`` had already truncated the file, leaving a README with no
+    markers at all -- so the next run could not find where to inject and the
+    original content was gone. Writing to a temp file and replacing means a
+    failed write leaves the original untouched.
+    """
     try:
-        original = readme.read_text()
-    except OSError as exc:
+        original = readme.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
         return False, f"cannot read {readme}: {exc}"
 
     if START_MARKER not in original or END_MARKER not in original:
@@ -230,9 +240,12 @@ def inject(readme: Path, section: str) -> tuple[bool, str]:
     if updated == original:
         return False, "README benchmark section already up to date"
 
+    temp = readme.with_suffix(readme.suffix + ".tmp")
     try:
-        readme.write_text(updated)
-    except OSError as exc:
+        temp.write_text(updated, encoding="utf-8", newline="\n")
+        os.replace(temp, readme)
+    except (OSError, UnicodeEncodeError) as exc:
+        temp.unlink(missing_ok=True)
         return False, f"cannot write {readme}: {exc}"
     return True, f"updated the benchmark section of {readme}"
 
