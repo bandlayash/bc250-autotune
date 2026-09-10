@@ -194,3 +194,73 @@ class TestMarkStable:
         result = apply.mark_stable()
         assert not result["promoted"]
         assert "throttling" in result["detail"]
+
+
+class TestSetGpuConfig:
+    """The operator-directed absolute config setter.
+
+    Unlike set_gpu_range it is not step-limited -- applying a known config in
+    one move is not what the step limit exists to prevent -- but every envelope
+    bound still applies, and it sets voltage as well as frequency.
+    """
+
+    @pytest.fixture
+    def stub(self, monkeypatch):
+        written: list[tuple] = []
+        state = governor.GovernorState(
+            backend="oberon", service=governor.OBERON_UNIT, active=True, enabled=True,
+            curve=[governor.OperatingPoint(1000, 875), governor.OperatingPoint(1600, 875)],
+            min_freq_mhz=1000, max_freq_mhz=1600,
+        )
+        monkeypatch.setattr(apply.governor, "get_state", lambda *_a, **_k: state)
+        monkeypatch.setattr(apply, "_prepare", lambda a, d, doc: (f"pre-{a}", []))
+        monkeypatch.setattr(
+            apply, "_write_oberon_config",
+            lambda lo, hi, vlo, vhi: (written.append((lo, hi, vlo, vhi)) or (True, "ok")),
+        )
+        monkeypatch.setattr(apply, "dry_run_enabled", lambda: False)
+        return {"written": written, "state": state}
+
+    def test_applies_frequency_and_voltage_together(self, stub):
+        result = apply.set_gpu_config(1000, 2000, 1000, 1000)
+        assert result["applied"]
+        assert stub["written"] == [(1000, 2000, 1000, 1000)]
+
+    def test_is_not_step_limited(self, stub):
+        """400 MHz in one move -- set_gpu_range would refuse this."""
+        assert apply.set_gpu_config(1000, 2000, 1000, 1000)["applied"]
+        assert apply.set_gpu_range(1000, 2000)["refused"]
+
+    def test_voltage_beyond_hard_bound_is_refused(self, stub):
+        result = apply.set_gpu_config(1000, 1600, 875, 1400, confirm=True)
+        assert result["refused"]
+        assert stub["written"] == []
+
+    def test_voltage_above_safe_bound_needs_confirmation(self, stub):
+        result = apply.set_gpu_config(1000, 1600, 875, 1100)
+        assert result["requires_confirmation"]
+        assert stub["written"] == []
+        assert apply.set_gpu_config(1000, 1600, 875, 1100, confirm=True)["applied"]
+
+    def test_frequency_beyond_the_asic_ceiling_is_refused(self, stub):
+        assert apply.set_gpu_config(1000, 2400, 1000, 1000, confirm=True)["refused"]
+        assert stub["written"] == []
+
+    def test_inverted_voltage_is_refused(self, stub):
+        result = apply.set_gpu_config(1000, 1600, 1000, 875)
+        assert result["refused"]
+        assert "voltage" in result["detail"]
+
+    def test_snapshot_failure_blocks_the_write(self, stub, monkeypatch):
+        def boom(*_a, **_k):
+            raise snapshots.SnapshotError("disk full")
+
+        monkeypatch.setattr(apply, "_prepare", boom)
+        assert apply.set_gpu_config(1000, 2000, 1000, 1000)["refused"]
+        assert stub["written"] == []
+
+    def test_dry_run_touches_nothing(self, stub, monkeypatch):
+        monkeypatch.setattr(apply, "dry_run_enabled", lambda: True)
+        result = apply.set_gpu_config(1000, 2000, 1000, 1000)
+        assert result["dry_run"] and not result["applied"]
+        assert stub["written"] == []

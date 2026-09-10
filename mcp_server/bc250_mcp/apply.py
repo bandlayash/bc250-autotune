@@ -252,6 +252,150 @@ def _set_range_cyan(min_mhz: int, max_mhz: int) -> tuple[bool, str]:
     )
 
 
+def set_gpu_config(
+    min_mhz: int,
+    max_mhz: int,
+    min_mv: int,
+    max_mv: int,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Apply a complete GPU configuration: both frequency range and voltages.
+
+    This is the **operator-directed** counterpart to ``set_gpu_range``, and the
+    difference between them is deliberate:
+
+    ``set_gpu_range``   for an autonomous search. Frequency only, and limited to
+                        one increment per call, because an agent stepping
+                        blindly must not be able to jump tiers.
+    ``set_gpu_config``  for applying a configuration someone already decided on
+                        -- a known-good tune, or a return to stock. Absolute,
+                        not stepped, and it sets voltage too.
+
+    The step limit is not a safety bound, it is a search constraint; applying a
+    known config in one move is not the thing it exists to prevent. Every actual
+    safety bound still applies: both frequencies and both voltages are checked
+    against the envelope, anything above a safe bound needs ``confirm=True``,
+    anything past a hard bound is refused, and the config is snapshotted with a
+    watchdog marker before the hardware is touched.
+    """
+    action = "set_gpu_config"
+    doc = envelope.load()
+    state = governor.get_state()
+
+    if min_mhz > max_mhz:
+        return ApplyResult(
+            action, False, dry_run_enabled(),
+            detail=f"min frequency ({min_mhz}) exceeds max ({max_mhz})",
+            refused=True,
+        ).to_dict()
+    if min_mv > max_mv:
+        return ApplyResult(
+            action, False, dry_run_enabled(),
+            detail=f"min voltage ({min_mv}) exceeds max ({max_mv})",
+            refused=True,
+        ).to_dict()
+
+    checks = [
+        envelope.check_upper(
+            "max_frequency_mhz", max_mhz, section="gpu",
+            hard_key="hard_max_frequency_mhz", safe_key="safe_max_frequency_mhz",
+            doc=doc,
+        ),
+        envelope.check_lower(
+            "min_frequency_mhz", min_mhz, section="gpu",
+            hard_key="hard_min_frequency_mhz", doc=doc,
+        ),
+        envelope.check_upper(
+            "max_voltage_mv", max_mv, section="gpu",
+            hard_key="hard_max_voltage_mv", safe_key="safe_max_voltage_mv",
+            doc=doc,
+        ),
+        envelope.check_lower(
+            "min_voltage_mv", min_mv, section="gpu",
+            hard_key="hard_min_voltage_mv", safe_key="safe_min_voltage_mv",
+            doc=doc,
+        ),
+    ]
+
+    blocked = _gate(action, checks, confirm)
+    if blocked:
+        return blocked.to_dict()
+
+    description = (
+        f"set GPU config to {min_mhz}-{max_mhz} MHz at {min_mv}/{max_mv} mV "
+        f"({state.backend})"
+    )
+    try:
+        label, warnings = _prepare(action, description, doc)
+    except snapshots.SnapshotError as exc:
+        return ApplyResult(
+            action, False, dry_run_enabled(),
+            detail=f"refusing to apply: cannot snapshot current state ({exc})",
+            refused=True,
+        ).to_dict()
+
+    result = ApplyResult(
+        action=action, applied=False, dry_run=dry_run_enabled(),
+        checks=[c.to_dict() for c in checks], snapshot=label, warnings=warnings,
+    )
+
+    if result.dry_run:
+        result.detail = f"DRY RUN: would {description}"
+        return result.to_dict()
+
+    if state.backend == "oberon":
+        ok, detail = _write_oberon_config(min_mhz, max_mhz, min_mv, max_mv)
+    elif state.backend == "cyan-skillfish" and state.supports_live_control:
+        # D-Bus sets the frequency window live; the V/F curve itself lives in
+        # config.toml, so voltage is not settable this way.
+        ok, detail = _set_range_cyan(min_mhz, max_mhz)
+        if ok:
+            result.warnings.append(
+                "cyan-skillfish: frequency range applied live over D-Bus, but "
+                "voltage comes from the safe-points curve in config.toml and "
+                "was NOT changed by this call"
+            )
+    else:
+        ok, detail = False, f"no writable governor backend (detected {state.backend!r})"
+
+    result.applied = ok
+    result.detail = detail
+    if not ok:
+        result.warnings.append(
+            "apply failed; the pending marker is still set, so the watchdog will "
+            "revert on the next boot. Call rollback() to revert now."
+        )
+    return result.to_dict()
+
+
+def _write_oberon_config(
+    min_mhz: int, max_mhz: int, min_mv: int, max_mv: int
+) -> tuple[bool, str]:
+    """Write a full oberon config and restart the daemon."""
+    content = (
+        "opps:\n"
+        "  - frequency:\n"
+        f"    - min: {min_mhz}\n"
+        f"    - max: {max_mhz}\n"
+        "  - voltage:\n"
+        f"    - min: {min_mv}\n"
+        f"    - max: {max_mv}\n"
+    )
+
+    ok, detail = restore._write_privileged(governor.OBERON_CONFIG, content, 0o644)
+    if not ok:
+        return False, detail
+
+    rc, out = _run(restore._sudo(["systemctl", "restart", governor.OBERON_UNIT]))
+    if rc != 0:
+        return False, f"config written but restart failed: {out}"
+    return True, (
+        f"wrote {min_mhz}-{max_mhz} MHz at {min_mv}/{max_mv} mV to "
+        f"{governor.OBERON_CONFIG} and restarted {governor.OBERON_UNIT} "
+        "(persistent across reboot)"
+    )
+
+
 def _set_range_oberon(
     min_mhz: int, max_mhz: int, state: governor.GovernorState
 ) -> tuple[bool, str]:

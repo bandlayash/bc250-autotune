@@ -230,6 +230,33 @@ def set_gpu_range(min_mhz: int, max_mhz: int, confirm: bool = False) -> dict[str
     return apply.set_gpu_range(min_mhz, max_mhz, confirm=confirm)
 
 
+@mcp.tool(annotations=MUTATING)
+def set_gpu_config(
+    min_mhz: int, max_mhz: int, min_mv: int, max_mv: int, confirm: bool = False
+) -> dict[str, Any]:
+    """Apply a complete GPU configuration: frequency range AND voltages.
+
+    Use this to apply a configuration someone has already decided on -- a
+    known-good tune, or a return to stock. Unlike `set_gpu_range` it is
+    absolute rather than stepped, and it sets voltage.
+
+    `set_gpu_range` is the tool for an autonomous search: frequency only, one
+    increment per call, so an agent cannot jump tiers. The step limit is a
+    search constraint, not a safety bound, and applying a known config in one
+    move is not what it exists to prevent.
+
+    Every safety bound still applies: both frequencies and both voltages are
+    envelope-checked, anything above a safe bound needs confirm=True, anything
+    past a hard bound is refused, and the current config is snapshotted with a
+    watchdog marker before the hardware is touched.
+
+    On oberon this rewrites /etc/oberon-config.yaml and restarts the daemon.
+    On cyan-skillfish the frequency range goes live over D-Bus but voltage
+    lives in the safe-points curve and is not changed -- the result says so.
+    """
+    return apply.set_gpu_config(min_mhz, max_mhz, min_mv, max_mv, confirm=confirm)
+
+
 @mcp.tool(annotations=RECOVERY)
 def rollback(to: str = "last_good", dry_run: bool = False) -> dict[str, Any]:
     """Restore a saved snapshot and clear the watchdog's pending marker.
