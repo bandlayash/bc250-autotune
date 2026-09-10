@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import sysfs
+from . import gpu_metrics, sysfs
 
 # amdgpu's hwmon exposes two unlabelled voltage rails, in0 and in1. Which is
 # which was established empirically against the SMU on the test unit rather
@@ -79,6 +79,21 @@ class Telemetry:
     cpu_temp_c: float | None = None
     cpu_vid_mv: int | None = None
     cpu_clocks_mhz: list[float] = field(default_factory=list)
+
+    # From the SMU gpu_metrics struct. These have no sysfs equivalent on this
+    # ASIC and are what make a precise "stop at thermal throttle" possible.
+    gfx_activity_percent: float | None = None
+    cur_gfxclk_mhz: float | None = None
+    gfx_power_w: float | None = None
+    cpu_power_w: float | None = None
+    socket_power_w: float | None = None
+    core_temps_c: list[float | None] = field(default_factory=list)
+    throttle_flags: list[str] = field(default_factory=list)
+    thermal_throttle_flags: list[str] = field(default_factory=list)
+    power_throttle_flags: list[str] = field(default_factory=list)
+    is_throttling: bool = False
+    is_thermally_throttling: bool = False
+    throttle_reported: bool = False
 
     fans: list[FanReading] = field(default_factory=list)
     superio_driver: str | None = None
@@ -215,7 +230,60 @@ def collect() -> Telemetry:
     reading.cpu_temp_c = _cpu_temp(superio)
     reading.cpu_clocks_mhz = _read_cpu_clocks()
 
+    _merge_gpu_metrics(reading, device)
     return reading
+
+
+def _merge_gpu_metrics(reading: Telemetry, device: Path | None) -> None:
+    """Fold in the SMU gpu_metrics struct, preferring it where it is richer.
+
+    Two of its fields override what sysfs gave us, for concrete reasons:
+
+    ``gfx_activity``  fills ``gpu_busy_percent``, which gfx1013 leaves
+                      unimplemented, so GPU load is otherwise unavailable.
+    ``cur_gfxclk``    is the SMU's own clock reading, more trustworthy than the
+                      pp_dpm_sclk live-readout row we parse as a fallback.
+
+    Everything else is additive. If gpu_metrics is unavailable the sysfs-derived
+    reading stands on its own.
+    """
+    metrics = gpu_metrics.read(device)
+    if not metrics.available:
+        reading.warnings.extend(metrics.warnings)
+        return
+
+    reading.gfx_activity_percent = metrics.gfx_activity_percent
+    reading.cur_gfxclk_mhz = metrics.cur_gfxclk_mhz
+    reading.gfx_power_w = metrics.gfx_power_w
+    reading.cpu_power_w = metrics.cpu_power_w
+    reading.socket_power_w = metrics.socket_power_w
+    reading.core_temps_c = metrics.core_temps_c
+
+    reading.throttle_reported = metrics.throttle_reported
+    reading.throttle_flags = metrics.throttle_flags
+    reading.thermal_throttle_flags = metrics.thermal_throttle_flags
+    reading.power_throttle_flags = metrics.power_throttle_flags
+    reading.is_throttling = metrics.is_throttling
+    reading.is_thermally_throttling = metrics.is_thermally_throttling
+
+    if reading.gpu_busy_percent is None and metrics.gfx_activity_percent is not None:
+        reading.gpu_busy_percent = int(metrics.gfx_activity_percent)
+
+    # Deliberately NOT cur_gfxclk. Under sustained load it tracks the
+    # pp_dpm_sclk live-readout row exactly and reads near zero while the GPU is
+    # saturated; avg_gfxclk is the only field that gives a usable clock. A zero
+    # is treated as "no reading" rather than an idle clock, because both fields
+    # intermittently return 0 mid-run.
+    if metrics.avg_gfxclk_mhz:
+        reading.gpu_clock_mhz = int(metrics.avg_gfxclk_mhz)
+
+    # Two independent sources agree closely on GPU temperature (hwmon
+    # temp1_input and gfx_temp tracked within 0.25 C across samples at 90 C),
+    # so either is fine; prefer the SMU's as it is the one driving throttling.
+    if metrics.gfx_temp_c is not None:
+        reading.gpu_temp_c = metrics.gfx_temp_c
+
+    reading.warnings.extend(metrics.warnings)
 
 
 def collect_dict() -> dict[str, Any]:

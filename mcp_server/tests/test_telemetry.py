@@ -139,3 +139,96 @@ class TestDegradedHardware:
         import json
 
         json.dumps(telemetry.collect_dict())
+
+
+class TestGpuMetricsMerge:
+    """gpu_metrics folding, including the clock field that cannot be trusted."""
+
+    def _blob(self, *, avg_gfxclk=772, cur_gfxclk=5, gfx_temp=9000, throttle=0):
+        import struct
+
+        data = bytearray(256)
+        struct.pack_into("<HBB", data, 0, 128, 2, 2)      # v2_2 header
+        struct.pack_into("<H", data, 4, gfx_temp)         # gfx temp, centi-C
+        struct.pack_into("<H", data, 6, 8125)             # soc temp
+        struct.pack_into("<H", data, 28, 0xFFFF)          # gfx_activity absent
+        struct.pack_into("<H", data, 40, 65430)           # socket power mW
+        struct.pack_into("<H", data, 64, avg_gfxclk)
+        struct.pack_into("<H", data, 76, cur_gfxclk)
+        struct.pack_into("<I", data, 108, 0xFFFFFFFF)     # legacy: not reported
+        struct.pack_into("<Q", data, 120, throttle)
+        return bytes(data)
+
+    def test_clock_comes_from_avg_not_cur(self, fake_box, monkeypatch):
+        """Regression: cur_gfxclk read ~5 MHz while the GPU was saturated.
+
+        It mirrors the pp_dpm_sclk live-readout row exactly, so using it made
+        the reported clock actively wrong under load. avg_gfxclk is the field
+        that tracks reality.
+        """
+        from bc250_mcp import gpu_metrics
+
+        monkeypatch.setattr(
+            gpu_metrics, "read", lambda _d=None: gpu_metrics.decode(self._blob())
+        )
+        reading = telemetry.collect()
+        assert reading.gpu_clock_mhz == 772
+        assert reading.cur_gfxclk_mhz == 5  # still reported, never authoritative
+
+    def test_zero_avg_clock_does_not_overwrite_with_idle(self, fake_box, monkeypatch):
+        """Both clock fields intermittently return 0 mid-run; ignore those."""
+        from bc250_mcp import gpu_metrics
+
+        monkeypatch.setattr(
+            gpu_metrics,
+            "read",
+            lambda _d=None: gpu_metrics.decode(self._blob(avg_gfxclk=0)),
+        )
+        # Falls back to the sysfs-derived value rather than claiming 0 MHz.
+        assert telemetry.collect().gpu_clock_mhz == 89
+
+    def test_thermal_throttle_is_distinguished_from_power_throttle(self):
+        from bc250_mcp import gpu_metrics
+
+        thermal = gpu_metrics.decode(self._blob(throttle=1 << 35))  # TEMP_EDGE
+        assert thermal.is_thermally_throttling
+        assert not thermal.is_power_throttling
+        assert thermal.thermal_throttle_flags == ["TEMP_EDGE"]
+
+        power = gpu_metrics.decode(self._blob(throttle=1 << 0))     # PPT0
+        assert power.is_power_throttling
+        assert not power.is_thermally_throttling
+
+    def test_all_ones_throttle_is_unknown_not_everything_engaged(self):
+        """0xFFFF... means 'not reported', not 'all 50 limiters active'."""
+        import struct
+
+        from bc250_mcp import gpu_metrics
+
+        data = bytearray(self._blob())
+        struct.pack_into("<Q", data, 120, 0xFFFFFFFFFFFFFFFF)
+        struct.pack_into("<I", data, 108, 0xFFFFFFFF)
+        metrics = gpu_metrics.decode(bytes(data))
+        assert metrics.throttle_flags == []
+        assert not metrics.throttle_reported
+        assert any("no throttle status" in w for w in metrics.warnings)
+
+    def test_unsupported_struct_version_refuses_to_decode(self):
+        """Offsets differ per revision; guessing would produce confident nonsense."""
+        import struct
+
+        from bc250_mcp import gpu_metrics
+
+        data = bytearray(self._blob())
+        struct.pack_into("<HBB", data, 0, 128, 2, 4)  # v2_4
+        metrics = gpu_metrics.decode(bytes(data))
+        assert not metrics.available
+        assert metrics.version == "v2_4"
+        assert any("not decoding" in w for w in metrics.warnings)
+
+    def test_truncated_blob_is_handled(self):
+        from bc250_mcp import gpu_metrics
+
+        metrics = gpu_metrics.decode(b"\x00" * 16)
+        assert not metrics.available
+        assert metrics.warnings
