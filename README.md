@@ -112,6 +112,151 @@ Efficiency: **0.635 → 0.853 FPS/W** (+34.3%).
 
 <!-- BENCHMARKS:END -->
 
+## Requirements
+
+- A real BC-250, running Linux, driven locally or over SSH.
+- **Passwordless sudo.** Almost everything needs root: SMU access through PCI
+  config space, `umr` register reads, and systemd. Unattended tuning cannot work
+  if sudo prompts.
+- Python 3.11+.
+- One of the two GPU governors installed and running —
+  [`oberon-governor`](https://gitlab.com/mothenjoyer69/oberon-governor) or
+  [`cyan-skillfish-governor-smu`](https://github.com/filippor/cyan-skillfish-governor).
+  The backend is detected automatically; you do not configure which.
+- Optional, for benchmarking: [FurMark 2](https://geeks3d.com/furmark/) (Linux
+  x86_64), plus `ffmpeg` for screenshots and `xrdb` — without `xrdb` FurMark
+  segfaults on a fresh display, see [docs/TARGET_MACHINE.md](docs/TARGET_MACHINE.md).
+
+## Install
+
+```bash
+git clone https://github.com/bandlayash/bc250-autotune.git
+cd bc250-autotune
+python3 -m venv .venv
+.venv/bin/pip install -e ./mcp_server
+```
+
+On an immutable distro (Bazzite, Silverblue) a venv is the right move — nothing
+needs to go into `/usr`.
+
+Check what the server can see on your box before doing anything else:
+
+```bash
+.venv/bin/python -c "import json, bc250_mcp.server as s; print(json.dumps(s.get_server_status(), indent=2))"
+```
+
+That reports the detected governor, which sensors work, and which upstream
+tools are missing, so you can plan around gaps rather than hit them mid-tune.
+
+## Connect it to an MCP client
+
+The server speaks stdio. For Claude Code:
+
+```bash
+claude mcp add bc250 -- /absolute/path/to/bc250-autotune/.venv/bin/bc250-mcp
+```
+
+For any client that takes a JSON config:
+
+```json
+{
+  "mcpServers": {
+    "bc250": {
+      "command": "/absolute/path/to/bc250-autotune/.venv/bin/bc250-mcp"
+    }
+  }
+}
+```
+
+The editable install puts a `bc250-mcp` console script in the venv, so no
+working directory or `PYTHONPATH` is needed. Verified: 18 tools over stdio.
+
+Set `DRY_RUN=1` in the environment to exercise the whole loop — envelope
+checks, step limits, snapshots — without touching hardware. Refusals are still
+refusals in dry run, so the rehearsal does not lie to you.
+
+## Install the watchdog (do this before any unattended tuning)
+
+This is what reverts a configuration that hangs the machine. It runs as a
+**separate process** from the MCP server, because in-memory state is exactly
+what a hang destroys.
+
+```bash
+sudo install -d -m 0755 /opt/bc250-autotune
+sudo cp -r mcp_server watchdog /opt/bc250-autotune/
+sudo cp watchdog/bc250-watchdog.service watchdog/bc250-watchdog-monitor.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now bc250-watchdog.service
+
+# Snapshots must live where the watchdog can read them as root at boot.
+sudo install -d -o "$USER" -g "$USER" -m 0755 /var/lib/bc250-autotune
+```
+
+Verify it is actually armed:
+
+```bash
+.venv/bin/python -c "import json, bc250_mcp.server as s; print(json.dumps(s.get_watchdog_status(), indent=2))"
+```
+
+`unattended_revert_ready` must be `true`. If it is not, the `problems` list says
+why. Do not start an unattended run until it is.
+
+## Tuning
+
+Take a snapshot first, then let the agent work through the
+[optimizer skill](skill/bc250-optimizer/SKILL.md):
+
+```
+snapshot_config("stock")     # capture what you have now
+get_safety_envelope()        # the bounds it must stay inside
+run_benchmark("stock", 120)  # baseline -- run it TWICE, see below
+set_gpu_range(1000, 1650)    # one 50 MHz step; refuses larger jumps
+run_benchmark("tuned", 120)
+rollback("last_good")        # if anything looks wrong
+mark_stable()                # once a config has proven itself
+```
+
+**Establish a noise floor before believing any result.** Run the baseline twice
+without changing anything and compare. On the reference unit the same config
+scored 12261 and 10843 depending only on starting temperature — a change
+smaller than that spread is not a result.
+
+To apply a configuration you have already decided on, including voltage, use
+`set_gpu_config(min_mhz, max_mhz, min_mv, max_mv)` instead. It is absolute
+rather than stepped; the step limit exists to constrain an autonomous search,
+not you.
+
+## Standalone benchmarking
+
+No MCP client needed:
+
+```bash
+export BC250_FURMARK_DIR=~/furmark/FurMark_linux64   # if not in a default path
+benchmarks/scripts/run_benchmark.sh stock 120
+python benchmarks/scripts/generate_readme_benchmarks.py
+```
+
+Each run waits for the GPU to cool to 60 °C first, samples telemetry every
+second, aborts on an over-temperature, appends a row to
+`benchmarks/results.jsonl`, and captures the score box.
+
+## Configuration
+
+| Variable | Purpose |
+|---|---|
+| `DRY_RUN=1` | log intended writes, touch no hardware |
+| `BC250_SAFETY_ENVELOPE` | path to an alternative `safety_envelope.yaml` |
+| `BC250_STATE_ROOT` | where snapshots and the watchdog marker live |
+| `BC250_FURMARK_DIR` | directory containing the `furmark` binary |
+| `BC250_BENCH_ROOT` | where `results.jsonl` and `raw/` are written |
+| `BC250_BENCH_DISPLAY` | force an X display instead of probing |
+
+**Tune `mcp_server/bc250_mcp/safety_envelope.yaml` to your unit before you
+start.** Its defaults come from one board plus upstream source. The CPU Vid
+ceiling in particular is set deliberately below the 1325 mV that upstream
+documents as having destroyed a board — read [docs/SAFETY.md](docs/SAFETY.md)
+before changing it.
+
 ## Layout
 
 ```
