@@ -1,0 +1,11 @@
+benchmarks/raw/*
+!benchmarks/raw/.gitkeep
+!benchmarks/raw/examples/
+snapshots/
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
