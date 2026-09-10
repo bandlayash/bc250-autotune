@@ -17,7 +17,7 @@ They differ enough that a single code path would misrepresent both:
     are volatile, which makes a power cycle a guaranteed rollback and is why the
     optimizer prefers this backend when it is available.
 
-This module is read-only (Phase 1). Writes land in Phase 2 on the same seam.
+This module is read-only. Writes live in ``apply.py``, on the same seam.
 """
 
 from __future__ import annotations

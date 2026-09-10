@@ -1,4 +1,4 @@
-# Upstream Interfaces (Phase 0 recon)
+# Upstream interfaces
 
 Reference for every external tool `bc250-autotune` drives. Recorded from reading the
 sources, not from documentation alone. Re-verify after upstream bumps.
@@ -11,9 +11,9 @@ sources, not from documentation alone. Re-verify after upstream bumps.
 | bc250-core-unlock | `rw-r-r-0644/bc250-core-unlock` | Standalone 6c/12t to 8c/16t unlock |
 | nct6687d | `Fred78290/nct6687d` | Nuvoton NCT6687-R hwmon driver, fan PWM |
 
-> The build plan named a tool `bc250-40cu-unlock`. No such repo is referenced by
-> `bc250-control-center`; the 40CU work lives in **bc250-cu-live-manager**, and CPU core
-> unlock lives in **bc250-core-unlock**. Treat those two as the plan's intent.
+> A tool named `bc250-40cu-unlock` is sometimes referenced but does not exist. The
+> 40CU work lives in **bc250-cu-live-manager**, and CPU core unlock in
+> **bc250-core-unlock**.
 
 ---
 
@@ -72,8 +72,8 @@ The commented-out extension reaches `2400 MHz @ 1150 mV`.
 ### D-Bus live control — the important find
 
 The daemon owns a **system-bus** name, so tuning can be changed live with no config
-rewrite and no service restart. This is strictly better than the plan's edit-TOML-and-restart
-approach and is what the MCP server should use for iterative tuning.
+rewrite and no service restart. This is strictly better than rewriting the TOML and restarting,
+and is what the server uses for iterative tuning.
 
 - Bus: **system**
 - Name: `com.cyanskillfish.Governor`
@@ -103,8 +103,8 @@ Range objects, interface `com.cyanskillfish.Governor.Range` (`Min`, `Max` proper
 
 `com.cyanskillfish.Governor.TestMode` — `SetTestMode(u frequency, u voltage)` sets an
 arbitrary off-curve V/F pair. **Root only**, explicitly denied to `context="default"` in
-`com.cyanskillfish.Governor.conf`. This is exactly the "may hang" primitive Phase 2 needs
-for the watchdog test, and it must never be exposed as an MCP tool.
+`com.cyanskillfish.Governor.conf`. This is exactly the "may hang" primitive the watchdog
+test needs, and it must never be exposed as an MCP tool.
 
 ---
 
@@ -291,7 +291,7 @@ resolve by `name`, never hardcode `hwmon2`.**
 > Bazzite is rpm-ostree / immutable. DKMS is not the normal path there — this needs
 > `akmods`, a COPR-provided kmod, or `rpm-ostree` layering, and it must be re-verified
 > after every OS image bump. Confirm on the box before building fan control on it, and
-> treat fan control as the *last* feature to land, not a Phase 1 dependency.
+> treat fan control as the *last* feature to land, not a dependency of anything else.
 
 ---
 

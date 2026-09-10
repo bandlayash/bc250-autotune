@@ -1,4 +1,4 @@
-"""Snapshot restore -- the rollback half of Phase 2.
+"""Snapshot restore -- the rollback half of the guarded-write path.
 
 Deliberately separate from ``snapshots.py`` so that capturing (pure reads) and
 restoring (privileged writes) cannot be confused for one another at a glance,

@@ -36,18 +36,6 @@ backend is detected automatically.
 The D-Bus path is preferred where available: changes are volatile, so a power
 cycle is a guaranteed rollback.
 
-## Status
-
-| Phase | State |
-|---|---|
-| 0 — Recon | done, see [docs/UPSTREAM_INTERFACES.md](docs/UPSTREAM_INTERFACES.md) |
-| 1 — Read-only MCP server | done |
-| 2 — Guarded writes + watchdog | done, revert verified across a reboot |
-| 3 — Benchmark harness | done |
-| 4 — Optimizer skill | done, see [skill/bc250-optimizer](skill/bc250-optimizer/SKILL.md) |
-| 5 — Agent guardrails | folded into phases 2–3 |
-| 6 — README generation | done (this section is generated) |
-
 ## Benchmarks
 
 Two 120 s FurMark passes at 1920x1080 on the reference unit, each started from
@@ -257,23 +245,49 @@ ceiling in particular is set deliberately below the 1325 mV that upstream
 documents as having destroyed a board — read [docs/SAFETY.md](docs/SAFETY.md)
 before changing it.
 
-## Layout
+## How it works
 
 ```
-mcp_server/bc250_mcp/    MCP server: telemetry, governor, writes, benchmark
-  safety_envelope.yaml   hard/safe bounds — the single source of truth
-watchdog/                boot-time revert service (separate process, by design)
-benchmarks/scripts/      standalone CLI wrappers
-docs/                    recon, decisions, safety, target-machine profile
+mcp_server/bc250_mcp/    MCP server: telemetry, governor backends, guarded
+                         writes, snapshots, benchmark harness
+  safety_envelope.yaml   hard and safe bounds — the single source of truth
+watchdog/                boot-time revert service, a separate process by design
+benchmarks/scripts/      standalone CLI wrappers, no MCP client needed
+skill/bc250-optimizer/   instructions for an agent driving the tools
 ```
+
+Every write follows the same path: check the safety envelope, enforce the step
+limit, snapshot the current config and fsync a watchdog marker to disk, then
+apply. A value beyond a hard bound is **refused, never clamped** — a silent
+clamp would leave you believing you applied one config while the hardware ran
+another, and every benchmark afterwards would be attributed to the wrong
+settings.
 
 ## Documentation
 
-- [docs/SAFETY.md](docs/SAFETY.md) — what protects you, what does not
-- [docs/UPSTREAM_INTERFACES.md](docs/UPSTREAM_INTERFACES.md) — every upstream tool's real interface, read from source
-- [docs/DECISIONS.md](docs/DECISIONS.md) — design decisions and corrections to the original plan
-- [docs/TARGET_MACHINE.md](docs/TARGET_MACHINE.md) — the test unit, and what it taught us
+- [docs/SAFETY.md](docs/SAFETY.md) — what protects you, what does not, and how to recover a box you cannot log into
+- [docs/DESIGN.md](docs/DESIGN.md) — why the design is the way it is
+- [docs/UPSTREAM_INTERFACES.md](docs/UPSTREAM_INTERFACES.md) — every upstream tool's real interface, read from source rather than documentation
+- [docs/TARGET_MACHINE.md](docs/TARGET_MACHINE.md) — the reference machine, and the hardware quirks it exposed
 - [docs/THIRD_PARTY_NOTICES.md](docs/THIRD_PARTY_NOTICES.md) — credits
+
+## Contributing
+
+Issues and pull requests welcome, particularly from anyone running a BC-250
+with a different BIOS revision, cooling solution, or governor — the safety
+envelope defaults come from a single board and would benefit from more.
+
+Tests run entirely against mocked sysfs and synthetic SMU data, so no hardware
+is needed:
+
+```bash
+cd mcp_server
+pip install -e ".[dev]"
+python -m pytest tests -q
+ruff check bc250_mcp tests
+```
+
+Anything hardware-in-the-loop is deliberately kept out of CI.
 
 ## License
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Phase 0 recon: inventory a BC-250 box. READ-ONLY -- touches no hardware state.
-# Run on the target: bash phase0_recon.sh
+# Inventory a BC-250 box: distro, GPU, sensors, governor, tooling, privileges.
+# READ-ONLY -- changes nothing. Run it on the target before anything else:
+#   bash inventory.sh
 set -uo pipefail
 
 hr() { printf '\n===== %s =====\n' "$1"; }

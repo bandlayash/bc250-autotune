@@ -1,13 +1,13 @@
 """CPU overclock/undervolt state.
 
-Phase 1 is read-only and deliberately avoids the SMU mailbox entirely. Reading
+This module is read-only and deliberately avoids the SMU mailbox. Reading
 Vid through ``Bc250Smu`` needs root and contends with the governor daemon for
 the same mailbox, which is too high a price for a status call that may be
 polled during a benchmark. Everything here comes from the config file, systemd,
 and /proc.
 
-Applying an overclock is Phase 2, and delegates to upstream ``bc250-detect`` /
-``bc250-apply`` rather than driving the SMU directly -- see docs/DECISIONS.md.
+Applying an overclock delegates to upstream ``bc250-detect`` / ``bc250-apply``
+rather than driving the SMU directly -- see docs/DESIGN.md.
 """
 
 from __future__ import annotations

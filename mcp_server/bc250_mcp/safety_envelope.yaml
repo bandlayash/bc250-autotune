@@ -131,8 +131,8 @@ benchmark:
   max_duration_s: 1800
 
 optimizer:
-  # Step sizes. No tool may move more than one step per call -- see Phase 5 of
-  # the build plan. Small steps are what make the search recoverable.
+  # Step sizes. No search tool may move more than one step per call; small
+  # steps are what make an unattended search recoverable.
   gpu_frequency_step_mhz: 50
   gpu_voltage_step_mv: 25
   cpu_frequency_step_mhz: 100

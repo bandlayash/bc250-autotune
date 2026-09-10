@@ -27,8 +27,8 @@ run is genuinely finished.
 
 **``--max-time`` is in SECONDS and ``--benchmark`` is required.** Without
 ``--benchmark`` the run is a stress test and produces no score at all. The
-build plan specified ``--max-time <duration_ms>``; passing milliseconds asks
-for a run a thousand times too long, which simply never finishes.
+flag is easily mistaken for milliseconds; passing milliseconds asks for a run
+a thousand times too long, which simply never finishes.
 
 Safety: telemetry is sampled continuously and the run is **aborted** if the GPU
 crosses ``benchmark.abort_gpu_temp_c``. The test unit reaches 90-95 C under
@@ -719,9 +719,9 @@ def run(
     # --benchmark is required to get a SCORE: --max-time alone runs a stress
     # test, which never produces one.
     #
-    # --max-time is in SECONDS. The build plan said milliseconds, and passing
-    # duration_s * 1000 asked for a 120,000-second run that of course never
-    # finished -- every early run was killed mid-stress-test with no result.
+    # --max-time is in SECONDS, not milliseconds. Passing duration_s * 1000
+    # asks for a 120,000-second run that of course never finishes -- the run is
+    # killed mid-stress-test and yields no result at all.
     # (--duration-ms is the millisecond-valued flag, if one is ever needed.)
     #
     # The score box is left enabled on purpose: it is what the screenshot

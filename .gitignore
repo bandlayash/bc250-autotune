@@ -1,3 +1,6 @@
+# Internal design brief; kept locally, not part of the public repo.
+BC250_AUTOTUNE_BUILD_PLAN.md
+
 benchmarks/raw/*
 !benchmarks/raw/.gitkeep
 !benchmarks/raw/20260910-144633-stock-final/

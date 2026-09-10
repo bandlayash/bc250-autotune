@@ -1,8 +1,9 @@
 """MCP entrypoint for BC-250 AutoTune (stdio transport).
 
-Phase 2: read-only tools plus guarded writes. Every write is gated by
-safety_envelope.yaml, limited to one step per call, and snapshotted to disk
-before the hardware is touched so the boot watchdog can revert it.
+Read-only telemetry plus guarded writes. Every write is gated by
+safety_envelope.yaml, limited to one step per call for search tools, and
+snapshotted to disk before the hardware is touched so the boot watchdog can
+revert it.
 
 Run with::
 
@@ -24,6 +25,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
 from . import (
+    __version__,
     apply,
     benchmark,
     cpu_oc,
@@ -36,8 +38,8 @@ from . import (
 
 mcp = MCPServer("bc250-autotune")
 
-# Phase 1 exposes nothing that mutates hardware. Advertising that explicitly
-# lets a client surface these as safe to call without prompting.
+# These tools mutate nothing. Advertising that explicitly lets a client
+# surface them as safe to call without prompting.
 READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True)
 
 
@@ -79,7 +81,6 @@ def get_gpu_governor_state() -> dict[str, Any]:
 def get_gpu_curve() -> dict[str, Any]:
     """List the GPU voltage/frequency operating points the governor will use.
 
-    This replaces the `list_gpu_safepoints` idea from the original build plan.
     There are no named safe-point tiers in either governor: cyan-skillfish
     stores an anonymous ordered frequency->voltage map that it interpolates
     across by load, and oberon has exactly two points. Tuning means moving the
@@ -158,7 +159,7 @@ def get_server_status() -> dict[str, Any]:
     reading = telemetry.collect()
 
     return {
-        "phase": "3 (benchmark harness)",
+        "version": __version__,
         "dry_run": _dry_run(),
         "writes_implemented": True,
         "governor_backend": state.backend,
@@ -176,9 +177,9 @@ def get_server_status() -> dict[str, Any]:
     }
 
 
-# Phase 2 writes. Marked destructive so a client can prompt on them, and
-# non-idempotent because each call steps the config rather than setting an
-# absolute state the caller can safely repeat.
+# Hardware writes. Marked destructive so a client can prompt on them, and
+# non-idempotent because a stepping call moves relative to current state
+# rather than setting an absolute one the caller can safely repeat.
 MUTATING = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False)
 
 # Rollback and snapshot are safe to repeat: both converge on a known state.
