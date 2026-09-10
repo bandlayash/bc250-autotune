@@ -33,7 +33,6 @@ only thing that stops a run cooking the board.
 
 from __future__ import annotations
 
-import csv
 import json
 import os
 import shutil
@@ -59,6 +58,22 @@ DEFAULT_HEIGHT = 1080
 
 # FurMark overshoots its own --max-time; kill it this long after the deadline.
 KILL_GRACE_S = 25
+
+# Start every run from a comparable thermal state.
+#
+# This is not politeness to the hardware, it is measurement validity. Runs
+# started back-to-back are not comparable: the test unit's first run began at
+# 55 C and took 38 s to reach 92 C, while the next began already hot and
+# tripped the abort far sooner. The operator's own historical runs, started
+# from cold, completed full 600 s passes peaking at 78-86 C -- the same box,
+# the same config, a completely different outcome purely from starting
+# temperature.
+#
+# Without this gate, a tuning session would attribute thermal drift to the
+# config change it just made.
+COOLDOWN_TARGET_C = 65.0
+COOLDOWN_TIMEOUT_S = 600
+COOLDOWN_POLL_S = 5.0
 # Seconds before the end to grab the screenshot, so the score box is populated
 # but the window has not torn down.
 SCREENSHOT_LEAD_S = 2.0
@@ -189,6 +204,9 @@ class BenchmarkResult:
 
     completed: bool = False
     aborted: bool = False
+    start_temp_c: float | None = None
+    cooldown_waited_s: float = 0.0
+    cold_start: bool = False
     abort_reason: str | None = None
     furmark_exit_code: int | None = None
 
@@ -369,24 +387,111 @@ def capture_screenshot(display: str, target: Path) -> tuple[bool, str]:
     return False, "; ".join(errors)
 
 
-def _read_scores_csv(path: Path) -> list[dict[str, str]]:
+# The trailing columns of a FurMark results row, in order. Everything before
+# these is descriptive text of unpredictable width -- see parse_scores_row.
+TRAILING_COLUMNS = (
+    "width", "height", "fullscreen", "antialiasing", "max_time",
+    "frames", "max_gpu_temp", "avg_fps", "min_fps", "max_fps",
+)
+
+
+def wait_for_cooldown(
+    target_c: float = COOLDOWN_TARGET_C,
+    timeout_s: float = COOLDOWN_TIMEOUT_S,
+) -> dict[str, Any]:
+    """Block until the GPU cools to ``target_c``, or the timeout elapses.
+
+    Returns a report rather than raising on timeout: a box whose idle
+    temperature is simply above the target (poor case airflow, hot room) should
+    still be benchmarkable, just with a recorded caveat so the numbers are not
+    silently compared against runs that started cooler.
+    """
+    started = time.time()
+    first = telemetry.collect().gpu_temp_c
+    if first is None:
+        return {
+            "waited_s": 0.0,
+            "start_temp_c": None,
+            "reached_target": False,
+            "note": "no GPU temperature available; cannot verify a cold start",
+        }
+    if first <= target_c:
+        return {
+            "waited_s": 0.0,
+            "start_temp_c": first,
+            "reached_target": True,
+            "note": f"already at {first} C",
+        }
+
+    current = first
+    while time.time() - started < timeout_s:
+        time.sleep(COOLDOWN_POLL_S)
+        current = telemetry.collect().gpu_temp_c
+        if current is None:
+            break
+        if current <= target_c:
+            return {
+                "waited_s": round(time.time() - started, 1),
+                "start_temp_c": current,
+                "reached_target": True,
+                "note": f"cooled from {first} C to {current} C",
+            }
+
+    return {
+        "waited_s": round(time.time() - started, 1),
+        "start_temp_c": current,
+        "reached_target": False,
+        "note": (
+            f"did not reach {target_c} C within {timeout_s:.0f}s (still "
+            f"{current} C); results are not comparable with runs started colder"
+        ),
+    }
+
+
+def _read_scores_rows(path: Path) -> list[str]:
+    """Return the data lines of the scores CSV, header excluded."""
     try:
-        with open(path, newline="") as handle:
-            return list(csv.DictReader(handle))
-    except (OSError, csv.Error):
+        lines = [
+            line.strip()
+            for line in path.read_text(errors="replace").splitlines()
+            if line.strip()
+        ]
+    except OSError:
         return []
+    # Drop the header if present.
+    return [line for line in lines if not line.startswith("date,")]
+
+
+def parse_scores_row(line: str) -> dict[str, str]:
+    """Parse one FurMark results line, counting from the END.
+
+    FurMark writes this file **unquoted**, and its ``renderer`` field contains
+    commas of its own::
+
+        ...,AMD,AMD BC-250 (radeonsi, gfx1013, ACO, DRM 3.64, 6.17.7-...),...
+
+    so a real row has 20 comma-separated fields against a 16-column header.
+    Parsing by header position therefore mis-maps every numeric field -- it read
+    ``max_time`` as 1920 (the width) and ``frames`` as 1080 (the height).
+    ``csv.DictReader`` does not help: the file is not quoted, so there is
+    nothing for it to disambiguate.
+
+    The descriptive prefix is variable-width but the numeric tail is not, so the
+    last ten fields are mapped positionally. That holds no matter how many
+    commas the driver decides to put in its renderer string.
+    """
+    fields = [field.strip() for field in line.split(",")]
+    if len(fields) < len(TRAILING_COLUMNS):
+        return {}
+    tail = fields[-len(TRAILING_COLUMNS):]
+    return dict(zip(TRAILING_COLUMNS, tail))
 
 
 def _apply_furmark_row(row: dict[str, str], result: BenchmarkResult) -> None:
     """Fold FurMark's own result row into ours.
 
-    Header, as written by 2.10.2::
-
-        date,demo,platform,vendor,renderer,api_version,width,height,fullscreen,
-        antialiasing,max_time,frames,max_gpu_temp,avg_fps,min_fps,max_fps
-
     Note ``frames`` is the headline "score"; ``avg_fps`` is a separate column
-    and is not score/duration.
+    and is not simply score/duration.
     """
     def number(key: str, cast=float):
         raw = (row.get(key) or "").strip()
@@ -409,6 +514,7 @@ def run(
     width: int = DEFAULT_WIDTH,
     height: int = DEFAULT_HEIGHT,
     screenshot: bool = True,
+    cooldown: bool = True,
 ) -> BenchmarkResult:
     """Run one benchmark pass and record it. Blocks for roughly ``duration_s``."""
     doc = envelope.load()
@@ -455,12 +561,25 @@ def run(
         gpu_range_mhz={"min": state.min_freq_mhz, "max": state.max_freq_mhz},
     )
 
+    if cooldown:
+        report = wait_for_cooldown()
+        result.start_temp_c = report["start_temp_c"]
+        result.cooldown_waited_s = report["waited_s"]
+        result.cold_start = report["reached_target"]
+        if not report["reached_target"]:
+            result.warnings.append(f"cooldown: {report['note']}")
+    else:
+        result.start_temp_c = telemetry.collect().gpu_temp_c
+        result.warnings.append(
+            "cooldown skipped; this run is not comparable with cold-start runs"
+        )
+
     seeded, detail = seed_xresources(display)
     if not seeded:
         result.warnings.append(detail)
 
     scores_csv = furmark_dir / SCORES_CSV
-    rows_before = len(_read_scores_csv(scores_csv))
+    rows_before = len(_read_scores_rows(scores_csv))
 
     sampler = _Sampler(
         abort_gpu_c=float(bench.get("abort_gpu_temp_c", 92)),
@@ -544,9 +663,9 @@ def run(
 
     # FurMark appends its row when the timed demo finishes, which happens before
     # the process gets around to exiting -- so a killed run still has a result.
-    rows_after = _read_scores_csv(scores_csv)
+    rows_after = _read_scores_rows(scores_csv)
     if len(rows_after) > rows_before:
-        _apply_furmark_row(rows_after[-1], result)
+        _apply_furmark_row(parse_scores_row(rows_after[-1]), result)
         result.completed = not result.aborted
     else:
         result.warnings.append(

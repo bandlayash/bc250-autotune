@@ -14,9 +14,12 @@ SCORES_HEADER = (
     "date,demo,platform,vendor,renderer,api_version,width,height,fullscreen,"
     "antialiasing,max_time,frames,max_gpu_temp,avg_fps,min_fps,max_fps"
 )
-SCORES_ROW = (
-    "2026.08.28@07:14:23,furmark-gl,Linux 6.17.7,AMD,AMD BC-250,"
-    "OpenGL 4.6,1920,1080,NO,Off,600,73126,83,121,112,125"
+# Verbatim from the test unit -- note the unquoted commas inside the renderer.
+REAL_ROW = (
+    "2026.08.28@07:14:23,furmark-gl,Linux 6.17.7-ba29.fc43.bc250cu.x86_64 64-bit,"
+    "AMD,AMD BC-250 (radeonsi, gfx1013, ACO, DRM 3.64, "
+    "6.17.7-ba29.fc43.bc250cu.x86_64),OpenGL 4.6 (Core Profile) Mesa 26.0.4,"
+    "1920,1080,NO,Off,600,73126,83,121,112,125"
 )
 
 
@@ -27,21 +30,48 @@ def bench_root(tmp_path, monkeypatch):
 
 
 class TestFurmarkRowParsing:
-    def test_maps_every_column_to_the_right_field(self):
-        import csv
-        import io
+    """FurMark writes this file UNQUOTED, with commas inside the renderer field.
 
-        row = next(csv.DictReader(io.StringIO(f"{SCORES_HEADER}\n{SCORES_ROW}")))
+    A real row therefore has 20 comma-separated fields against a 16-column
+    header, and any header-position parse mis-maps every number. Parsing from
+    the end is what makes it reliable.
+    """
+
+    def test_real_row_with_commas_in_the_renderer(self):
+        """Verbatim from the test unit. Header-position parsing read max_time as
+        1920 (the width) and frames as 1080 (the height)."""
+        row = benchmark.parse_scores_row(REAL_ROW)
         result = BenchmarkResult(run_id="r", config_label="c")
         benchmark._apply_furmark_row(row, result)
 
-        # `frames` is the headline score; avg_fps is its own column and is NOT
-        # score/duration (73126/600 = 121.9, close but not equal to 121).
+        assert row["width"] == "1920"
+        assert row["height"] == "1080"
+        assert row["max_time"] == "600"
         assert result.score_frames == 73126
         assert result.avg_fps == 121
         assert result.min_fps == 112
         assert result.max_fps == 125
         assert result.furmark_max_gpu_temp_c == 83
+
+    def test_extra_commas_do_not_shift_the_numeric_tail(self):
+        """However many commas the driver adds, the last ten fields are fixed."""
+        noisy = REAL_ROW.replace(
+            "AMD BC-250 (radeonsi", "AMD BC-250 (radeonsi, extra, more, fields"
+        )
+        row = benchmark.parse_scores_row(noisy)
+        assert row["max_time"] == "600"
+        assert row["frames"] == "73126"
+        assert row["max_fps"] == "125"
+
+    def test_header_line_is_not_treated_as_data(self, tmp_path):
+        path = tmp_path / "_scores_maxtime.csv"
+        path.write_text(SCORES_HEADER + "\n" + REAL_ROW + "\n")
+        rows = benchmark._read_scores_rows(path)
+        assert len(rows) == 1
+        assert benchmark.parse_scores_row(rows[0])["frames"] == "73126"
+
+    def test_short_row_yields_nothing_rather_than_wrong_numbers(self):
+        assert benchmark.parse_scores_row("a,b,c") == {}
 
     def test_blank_and_malformed_fields_become_none(self):
         result = BenchmarkResult(run_id="r", config_label="c")
