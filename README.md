@@ -42,8 +42,15 @@ cycle is a guaranteed rollback.
 
 ## Benchmarks
 
+Both configs benchmarked below run under the same governor
+(`oberon-governor`). The table above documents which governors the
+hardware/tool supports — it isn't what's being compared in the results that
+follow.
+
 Two 120 s FurMark passes at 1920x1080 on the reference unit, each started from
-a cooled GPU (60 °C gate) so the pair is comparable.
+a cooled GPU (60 °C gate — a checkpoint enforced before each run starts, not
+an idle or ambient temperature; actual idle will vary a lot with room
+ambient and case airflow) so the pair is comparable.
 
 **Stock** is oberon's packaged default, `1000–2000 MHz @ 1000 mV`. **Tuned** is
 a *lower* clock ceiling at a *lower* voltage, `1000–1600 MHz @ 875 mV` — an
