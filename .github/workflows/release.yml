@@ -1,0 +1,37 @@
+name: Release
+
+# Fires when a vX.Y.Z tag is pushed (see the "release" skill in
+# .claude/skills/release/ for the workflow that produces one). Publishes a
+# GitHub Release for that tag with auto-generated notes -- it does not build
+# or publish any package, since this project has nowhere to publish to.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches package version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version=$(grep -m1 '^version = ' mcp_server/pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match mcp_server/pyproject.toml version ($pkg_version)"
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
