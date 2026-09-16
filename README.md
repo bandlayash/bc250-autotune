@@ -40,6 +40,47 @@ backend is detected automatically.
 The D-Bus path is preferred where available: changes are volatile, so a power
 cycle is a guaranteed rollback.
 
+## The reference unit
+
+Every number in this README comes from one machine: a BC-250 board in a custom
+3D-printed case, driven over SSH. Its full profile — OS, kernel, governor state,
+and the hardware quirks it exposed — is in
+[docs/TARGET_MACHINE.md](docs/TARGET_MACHINE.md).
+
+<table>
+<tr>
+<td width="50%"><img src="docs/images/unit-assembled.jpg" alt="The assembled BC-250 in a black 3D-printed case, standing on carpet, with a red rocker switch on the lower panel"></td>
+<td width="50%"><img src="docs/images/unit-size-comparison.jpg" alt="The black 3D-printed BC-250 case standing on a desk beside a larger silver aluminium Mini-ITX case"></td>
+</tr>
+<tr>
+<td><b>Closed up.</b> The board lives in a custom 3D-printed case, slotted on
+the top and side panels to feed the cooler. The red rocker cuts power — the
+physical last resort when a configuration hangs the box and the
+<a href="#install-the-watchdog-do-this-before-any-unattended-tuning">watchdog</a>
+is what brings it back.</td>
+<td><b>For scale</b>, next to a Mini-ITX build. The BC-250 is a repurposed
+mining board, so the whole point is that this much GPU fits in this little
+volume — and that volume is also why the unit is thermally limited rather
+than voltage or frequency limited.</td>
+</tr>
+<tr>
+<td><img src="docs/images/internals.jpg" alt="Top-down view of the open case: the BC-250 board with an aftermarket tower cooler over the APU, and a small power supply along the front edge"></td>
+<td><img src="docs/images/tuning-session.jpg" alt="The open BC-250 case on the floor next to a laptop running a Claude Code session about BC-250 temperature testing"></td>
+</tr>
+<tr>
+<td><b>Inside.</b> The stock cooling is gone: an aftermarket Thermalright tower
+cooler sits over the APU, with the power supply along the front edge. The fan
+you see is the one <code>get_fan_state()</code> reports on — and the one the
+board's own curve already pins at 100%, which is why
+<a href="docs/TARGET_MACHINE.md#does-fan-control-actually-help-on-this-unit-no">fan
+control buys nothing here</a>.</td>
+<td><b>A tuning session in progress.</b> The unit runs headless on the floor
+while an agent drives the MCP tools over SSH from the laptop — snapshot,
+apply one step, benchmark, keep or roll back. Nothing is typed into the
+BC-250 itself.</td>
+</tr>
+</table>
+
 ## Benchmarks
 
 Two 120 s FurMark passes at 1920x1080 on the reference unit, each started from
